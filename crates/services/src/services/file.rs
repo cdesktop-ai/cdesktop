@@ -27,11 +27,14 @@ pub enum FileError {
     ResponseBuildError(String),
 }
 
+const MAX_SANITIZED_FILENAME_STEM_CHARS: usize = 50;
+
 /// Sanitize filename for filesystem safety:
 /// - Lowercase
 /// - Spaces → underscores
 /// - Remove special characters (keep alphanumeric and underscores)
 /// - Truncate if too long
+
 fn sanitize_filename(name: &str) -> String {
     let stem = Path::new(name)
         .file_stem()
@@ -45,14 +48,43 @@ fn sanitize_filename(name: &str) -> String {
         .filter(|c| c.is_alphanumeric() || *c == '_')
         .collect();
 
-    // Truncate to reasonable length to avoid filesystem limits
-    let max_len = 50;
-    if clean.len() > max_len {
-        clean[..max_len].to_string()
-    } else if clean.is_empty() {
+    // Truncate by Unicode scalar values rather than byte offsets. A byte-based
+    // slice can split a multi-byte UTF-8 character and panic for non-ASCII
+    // filenames such as those containing Cyrillic text.
+    let clean: String = clean
+        .chars()
+        .take(MAX_SANITIZED_FILENAME_STEM_CHARS)
+        .collect();
+
+    if clean.is_empty() {
         "file".to_string()
     } else {
         clean
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_filename;
+
+    #[test]
+    fn sanitizes_unicode_filename_without_panicking() {
+        assert_eq!(
+            sanitize_filename("4636__исполнитель_подтвердился.pdf"),
+            "4636__исполнитель_подтвердился"
+        );
+    }
+
+    #[test]
+    fn truncates_unicode_filename_by_characters() {
+        let filename = format!("{}яя.txt", "a".repeat(49));
+
+        assert_eq!(sanitize_filename(&filename), format!("{}я", "a".repeat(49)));
+    }
+
+    #[test]
+    fn uses_fallback_for_filename_without_safe_characters() {
+        assert_eq!(sanitize_filename("..."), "file");
     }
 }
 
