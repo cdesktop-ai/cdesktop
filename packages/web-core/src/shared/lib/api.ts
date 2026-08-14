@@ -1158,6 +1158,24 @@ export const profilesApi = {
 };
 
 // Workspace attachments API
+const getUploadErrorMessage = async (response: Response): Promise<string> => {
+  const responseText = (await response.text()).trim();
+
+  if (responseText) {
+    try {
+      const errorData = JSON.parse(responseText) as {
+        message?: string;
+        error?: string;
+      };
+      return errorData.message || errorData.error || responseText;
+    } catch {
+      return responseText;
+    }
+  }
+
+  return response.statusText || `HTTP ${response.status}`;
+};
+
 export const attachmentsApi = {
   upload: async (attachment: File): Promise<AttachmentResponse> => {
     const formData = new FormData();
@@ -1170,9 +1188,9 @@ export const attachmentsApi = {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorMessage = await getUploadErrorMessage(response);
       throw new ApiError(
-        `Failed to upload attachment: ${errorText}`,
+        `Failed to upload attachment: ${errorMessage}`,
         response.status,
         response
       );
@@ -1198,9 +1216,9 @@ export const attachmentsApi = {
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorMessage = await getUploadErrorMessage(response);
       throw new ApiError(
-        `Failed to upload attachment: ${errorText}`,
+        `Failed to upload attachment: ${errorMessage}`,
         response.status,
         response
       );
@@ -1227,9 +1245,9 @@ export const attachmentsApi = {
     );
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorMessage = await getUploadErrorMessage(response);
       throw new ApiError(
-        `Failed to upload attachment: ${errorText}`,
+        `Failed to upload attachment: ${errorMessage}`,
         response.status,
         response
       );

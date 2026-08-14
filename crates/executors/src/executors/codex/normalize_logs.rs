@@ -41,6 +41,7 @@ use workspace_utils::{
     diff::normalize_unified_diff,
     msg_store::MsgStore,
     path::make_path_relative,
+    text::Utf8ChunkDecoder,
 };
 
 use crate::{
@@ -84,6 +85,8 @@ struct CommandState {
     command: String,
     stdout: String,
     stderr: String,
+    stdout_decoder: Utf8ChunkDecoder,
+    stderr_decoder: Utf8ChunkDecoder,
     formatted_output: Option<String>,
     status: ToolStatus,
     exit_code: Option<i32>,
@@ -1768,6 +1771,8 @@ pub fn normalize_logs(
                             command: command_text,
                             stdout: String::new(),
                             stderr: String::new(),
+                            stdout_decoder: Utf8ChunkDecoder::default(),
+                            stderr_decoder: Utf8ChunkDecoder::default(),
                             formatted_output: None,
                             status: ToolStatus::Created,
                             exit_code: None,
@@ -1789,7 +1794,10 @@ pub fn normalize_logs(
                     chunk,
                 }) => {
                     if let Some(command_state) = state.commands.get_mut(&call_id) {
-                        let chunk = String::from_utf8_lossy(&chunk);
+                        let chunk = match stream {
+                            ExecOutputStream::Stdout => command_state.stdout_decoder.decode(&chunk),
+                            ExecOutputStream::Stderr => command_state.stderr_decoder.decode(&chunk),
+                        };
                         if chunk.is_empty() {
                             continue;
                         }
