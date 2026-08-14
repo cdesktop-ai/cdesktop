@@ -36,7 +36,7 @@ use executors::{
     executors::{BaseCodingAgent, CancellationToken, ExecutorExitResult, ExecutorExitSignal},
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
 };
-use futures::{FutureExt, TryStreamExt, stream::select};
+use futures::{FutureExt, StreamExt, stream::select};
 use git::GitService;
 use serde_json::json;
 use services::services::{
@@ -56,7 +56,7 @@ use tokio_util::io::ReaderStream;
 use utils::{
     log_msg::LogMsg,
     msg_store::MsgStore,
-    text::{git_branch_id, short_uuid, truncate_to_char_boundary},
+    text::{Utf8ChunkDecoder, git_branch_id, short_uuid, truncate_to_char_boundary},
 };
 use uuid::Uuid;
 use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
@@ -842,13 +842,20 @@ impl LocalContainerService {
         let out = child.inner().stdout.take().expect("no stdout");
         let err = child.inner().stderr.take().expect("no stderr");
 
-        // Map stdout bytes -> LogMsg::Stdout
-        let out = ReaderStream::new(out)
-            .map_ok(|chunk| LogMsg::Stdout(String::from_utf8_lossy(&chunk).into_owned()));
+        // Decode stdout and stderr incrementally. A UTF-8 character may be
+        // split across ReaderStream chunks, so decoding each chunk separately
+        // with from_utf8_lossy would turn Cyrillic characters into `�`.
+        let out = ReaderStream::new(out).scan(Utf8ChunkDecoder::default(), |decoder, chunk| {
+            std::future::ready(Some(
+                chunk.map(|chunk| LogMsg::Stdout(decoder.decode(&chunk))),
+            ))
+        });
 
-        // Map stderr bytes -> LogMsg::Stderr
-        let err = ReaderStream::new(err)
-            .map_ok(|chunk| LogMsg::Stderr(String::from_utf8_lossy(&chunk).into_owned()));
+        let err = ReaderStream::new(err).scan(Utf8ChunkDecoder::default(), |decoder, chunk| {
+            std::future::ready(Some(
+                chunk.map(|chunk| LogMsg::Stderr(decoder.decode(&chunk))),
+            ))
+        });
 
         // If you have a JSON Patch source, map it to LogMsg::JsonPatch too, then select all three.
 
