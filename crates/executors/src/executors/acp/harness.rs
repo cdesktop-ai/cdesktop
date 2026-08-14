@@ -18,6 +18,7 @@ use tokio_util::{
 use tracing::error;
 use workspace_utils::{
     approvals::ApprovalStatus, command_ext::GroupSpawnNoWindowExt, stream_lines::LinesStreamExt,
+    text::Utf8ChunkDecoder,
 };
 
 use super::{AcpClient, SessionManager};
@@ -260,7 +261,9 @@ impl AcpAgentHarness {
         tokio::spawn(async move {
             let mut child_stdin = orig_stdin;
             let mut lines = ReaderStream::new(acp_out_reader)
-                .map(|res| res.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+                .scan(Utf8ChunkDecoder::default(), |decoder, chunk| {
+                    std::future::ready(Some(chunk.map(|chunk| decoder.decode(&chunk))))
+                })
                 .lines();
             while let Some(result) = lines.next().await {
                 if *stdin_shutdown_rx.borrow() {
