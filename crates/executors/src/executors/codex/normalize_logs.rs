@@ -19,17 +19,16 @@ use codex_app_server_protocol::{
 use codex_protocol::{
     dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem,
     items::TurnItem,
-    openai_models::ReasoningEffort,
     plan_tool::{StepStatus, UpdatePlanArgs},
     protocol::{
-        AgentMessageDeltaEvent, AgentMessageEvent, AgentReasoningDeltaEvent, AgentReasoningEvent,
-        AgentReasoningSectionBreakEvent, ApplyPatchApprovalRequestEvent, BackgroundEventEvent,
-        ErrorEvent, EventMsg, ExecApprovalRequestEvent, ExecCommandBeginEvent, ExecCommandEndEvent,
-        ExecCommandOutputDeltaEvent, ExecOutputStream, ExitedReviewModeEvent,
-        FileChange as CodexProtoFileChange, ItemCompletedEvent, ItemStartedEvent, McpInvocation,
-        McpToolCallBeginEvent, McpToolCallEndEvent, ModelRerouteEvent, PatchApplyBeginEvent,
-        PatchApplyEndEvent, PlanDeltaEvent, RequestUserInputEvent, StreamErrorEvent,
-        ViewImageToolCallEvent, WarningEvent, WebSearchBeginEvent, WebSearchEndEvent,
+        AgentMessageEvent, AgentReasoningEvent, AgentReasoningSectionBreakEvent,
+        ApplyPatchApprovalRequestEvent, ErrorEvent, EventMsg, ExecApprovalRequestEvent,
+        ExecCommandBeginEvent, ExecCommandEndEvent, ExecCommandOutputDeltaEvent, ExecOutputStream,
+        ExitedReviewModeEvent, FileChange as CodexProtoFileChange, ItemCompletedEvent,
+        ItemStartedEvent, McpInvocation, McpToolCallBeginEvent, McpToolCallEndEvent,
+        ModelRerouteEvent, PatchApplyBeginEvent, PatchApplyEndEvent, PlanDeltaEvent,
+        RequestUserInputEvent, StreamErrorEvent, ViewImageToolCallEvent, WarningEvent,
+        WebSearchBeginEvent, WebSearchEndEvent,
     },
 };
 use futures::StreamExt;
@@ -387,7 +386,7 @@ struct LogState {
 struct ModelParamsState {
     index: Option<usize>,
     model: Option<String>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<String>,
 }
 
 enum StreamingTextKind {
@@ -669,6 +668,9 @@ fn dynamic_tool_markdown_from_app_items(items: &[AppDynamicToolCallOutputContent
             AppDynamicToolCallOutputContentItem::InputImage { image_url } => {
                 format!("Image: {image_url}")
             }
+            AppDynamicToolCallOutputContentItem::InputAudio { audio_url } => {
+                format!("Audio: {audio_url}")
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -681,6 +683,9 @@ fn dynamic_tool_markdown_from_core_items(items: &[CoreDynamicToolCallOutputConte
             CoreDynamicToolCallOutputContentItem::InputText { text } => text.clone(),
             CoreDynamicToolCallOutputContentItem::InputImage { image_url } => {
                 format!("Image: {image_url}")
+            }
+            CoreDynamicToolCallOutputContentItem::InputAudio { audio_url } => {
+                format!("Audio: {audio_url}")
             }
         })
         .collect::<Vec<_>>()
@@ -1007,7 +1012,8 @@ fn handle_direct_item_started(
                 },
             );
         }
-        AppThreadItem::WebSearch { id, .. } => {
+        AppThreadItem::WebSearch(search) => {
+            let id = search.id;
             state.web_searches.insert(id.clone(), WebSearchState::new());
             let web_search_state = state.web_searches.get_mut(&id).unwrap();
             let normalized_entry = web_search_state.to_normalized_entry();
@@ -1122,8 +1128,8 @@ fn handle_direct_item_completed(
                     } else {
                         mcp_tool_state.result = Some(ToolResult {
                             r#type: ToolResultValueType::Json,
-                            value: result.structured_content.unwrap_or_else(|| {
-                                serde_json::to_value(result.content).unwrap_or_default()
+                            value: result.structured_content.clone().unwrap_or_else(|| {
+                                serde_json::to_value(&result.content).unwrap_or_default()
                             }),
                         });
                     }
@@ -1170,17 +1176,18 @@ fn handle_direct_item_completed(
                 },
             );
         }
-        AppThreadItem::WebSearch { id, query, .. } => {
+        AppThreadItem::WebSearch(search) => {
+            let id = search.id;
             if let Some(mut entry) = state.web_searches.remove(&id) {
                 entry.status = ToolStatus::Success;
-                entry.query = Some(query);
+                entry.query = Some(search.query);
                 if let Some(index) = entry.index {
                     replace_normalized_entry(msg_store, index, entry.to_normalized_entry());
                 }
             }
         }
         AppThreadItem::ImageView { path, .. } => {
-            let relative_path = make_path_relative(&path.to_string_lossy(), worktree_path);
+            let relative_path = make_path_relative(&path.to_string(), worktree_path);
             add_normalized_entry(
                 msg_store,
                 entry_index,
@@ -1607,16 +1614,6 @@ pub fn normalize_logs(
                         &mut state.model_params,
                     );
                 }
-                EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
-                    state.thinking = None;
-                    let (entry, index, is_new) = state.assistant_message_append(delta);
-                    upsert_normalized_entry(&msg_store, index, entry, is_new);
-                }
-                EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }) => {
-                    state.assistant = None;
-                    let (entry, index, is_new) = state.thinking_append(delta);
-                    upsert_normalized_entry(&msg_store, index, entry, is_new);
-                }
                 EventMsg::AgentMessage(AgentMessageEvent { message, .. }) => {
                     state.thinking = None;
                     let (entry, index, is_new) = state.assistant_message(message);
@@ -1685,6 +1682,7 @@ pub fn normalize_logs(
                     changes,
                     reason: _,
                     grant_root: _,
+                    ..
                 }) => {
                     state.assistant = None;
                     state.thinking = None;
@@ -1754,6 +1752,7 @@ pub fn normalize_logs(
                     source: _,
                     interaction_input: _,
                     process_id: _,
+                    ..
                 }) => {
                     state.assistant = None;
                     state.thinking = None;
@@ -1845,18 +1844,6 @@ pub fn normalize_logs(
                         );
                     }
                 }
-                EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
-                    add_normalized_entry(
-                        &msg_store,
-                        &entry_index,
-                        NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: format!("Background event: {message}"),
-                            metadata: None,
-                        },
-                    );
-                }
                 EventMsg::StreamError(StreamErrorEvent {
                     message,
                     codex_error_info,
@@ -1878,6 +1865,7 @@ pub fn normalize_logs(
                 EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
                     call_id,
                     invocation,
+                    ..
                 }) => {
                     state.assistant = None;
                     state.thinking = None;
@@ -2128,7 +2116,7 @@ pub fn normalize_logs(
                 EventMsg::ViewImageToolCall(ViewImageToolCallEvent { call_id: _, path }) => {
                     state.assistant = None;
                     state.thinking = None;
-                    let path_str = path.to_string_lossy().to_string();
+                    let path_str = path.to_string();
                     let relative_path = make_path_relative(&path_str, &worktree_path_str);
                     add_normalized_entry(
                         &msg_store,
@@ -2295,6 +2283,7 @@ pub fn normalize_logs(
                     call_id,
                     turn_id: _,
                     questions: event_questions,
+                    ..
                 }) => {
                     state.assistant = None;
                     state.thinking = None;
@@ -2374,54 +2363,7 @@ pub fn normalize_logs(
                         }
                     }
                 }
-                EventMsg::AgentReasoningRawContent(..)
-                | EventMsg::AgentReasoningRawContentDelta(..)
-                | EventMsg::ThreadRolledBack(..)
-                | EventMsg::TurnStarted(..)
-                | EventMsg::UserMessage(..)
-                | EventMsg::TurnDiff(..)
-                | EventMsg::GetHistoryEntryResponse(..)
-                | EventMsg::McpListToolsResponse(..)
-                | EventMsg::McpStartupComplete(..)
-                | EventMsg::McpStartupUpdate(..)
-                | EventMsg::DeprecationNotice(..)
-                | EventMsg::UndoCompleted(..)
-                | EventMsg::UndoStarted(..)
-                | EventMsg::RawResponseItem(..)
-                | EventMsg::ItemStarted(..)
-                | EventMsg::ItemCompleted(..)
-                | EventMsg::AgentMessageContentDelta(..)
-                | EventMsg::ReasoningContentDelta(..)
-                | EventMsg::ReasoningRawContentDelta(..)
-                | EventMsg::ListSkillsResponse(..)
-                | EventMsg::SkillsUpdateAvailable
-                | EventMsg::TurnAborted(..)
-                | EventMsg::ShutdownComplete
-                | EventMsg::TerminalInteraction(..)
-                | EventMsg::ElicitationRequest(..)
-                | EventMsg::TurnComplete(..)
-                | EventMsg::CollabAgentSpawnBegin(..)
-                | EventMsg::CollabAgentSpawnEnd(..)
-                | EventMsg::CollabAgentInteractionBegin(..)
-                | EventMsg::CollabAgentInteractionEnd(..)
-                | EventMsg::CollabWaitingBegin(..)
-                | EventMsg::CollabWaitingEnd(..)
-                | EventMsg::CollabCloseBegin(..)
-                | EventMsg::CollabCloseEnd(..)
-                | EventMsg::CollabResumeBegin(..)
-                | EventMsg::CollabResumeEnd(..)
-                | EventMsg::ThreadNameUpdated(..)
-                | EventMsg::RealtimeConversationStarted(..)
-                | EventMsg::RealtimeConversationSdp(..)
-                | EventMsg::RealtimeConversationRealtime(..)
-                | EventMsg::RealtimeConversationClosed(..)
-                | EventMsg::RealtimeConversationListVoicesResponse(..)
-                | EventMsg::ImageGenerationBegin(..)
-                | EventMsg::ImageGenerationEnd(..)
-                | EventMsg::RequestPermissions(..)
-                | EventMsg::HookCompleted(..)
-                | EventMsg::HookStarted(..)
-                | EventMsg::GuardianAssessment(..) => {}
+                _ => {}
             }
         }
     });
@@ -2459,9 +2401,9 @@ fn handle_jsonrpc_response(
     }
 }
 
-fn handle_model_params(
+fn handle_model_params<R: ToString>(
     model: Option<String>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<R>,
     msg_store: &Arc<MsgStore>,
     entry_index: &EntryIndexProvider,
     state: &mut ModelParamsState,
@@ -2470,7 +2412,7 @@ fn handle_model_params(
         state.model = Some(model);
     }
     if let Some(reasoning_effort) = reasoning_effort {
-        state.reasoning_effort = Some(reasoning_effort);
+        state.reasoning_effort = Some(reasoning_effort.to_string());
     }
 
     let mut params = vec![];
@@ -2779,6 +2721,7 @@ mod tests {
                     "threadId": "thread-1",
                     "turnId": "turn-1",
                     "itemId": call_id,
+                    "startedAtMs": 1,
                     "approvalId": "approval-1",
                     "command": "git push"
                 }
@@ -2876,9 +2819,11 @@ mod tests {
                 "params": {
                     "threadId": "thread-1",
                     "turnId": "turn-1",
+                    "completedAtMs": 2,
                     "item": {
                         "type": "dynamicToolCall",
                         "id": call_id,
+                        "namespace": null,
                         "tool": tool_name,
                         "arguments": {"id": "ABC-123"},
                         "status": "completed",

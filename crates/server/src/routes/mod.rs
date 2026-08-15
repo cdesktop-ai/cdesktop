@@ -17,6 +17,7 @@ pub mod execution_processes;
 pub mod frontend;
 pub mod health;
 pub mod host_relay;
+pub mod maintenance;
 pub mod oauth;
 pub mod organizations;
 pub mod preview;
@@ -51,6 +52,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(routines::router(&deployment))
         .merge(events::router(&deployment))
         .merge(approvals::router())
+        .merge(maintenance::router())
         .merge(scratch::router(&deployment))
         .merge(search::router(&deployment))
         .merge(preview::api_router())
@@ -78,6 +80,9 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(relay_signed_routes)
         .layer(ValidateRequestHeaderLayer::custom(
             middleware::validate_origin,
+        ))
+        .layer(axum::middleware::from_fn(
+            middleware::reject_mutations_while_draining,
         ))
         .layer(axum::middleware::from_fn(middleware::log_server_errors))
         .with_state(deployment);

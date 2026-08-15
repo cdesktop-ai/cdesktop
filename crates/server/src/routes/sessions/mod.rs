@@ -12,20 +12,18 @@ use axum::{
 use db::models::{
     coding_agent_turn::{CodingAgentTurn, TurnSelection},
     execution_process::{ExecutionProcess, ExecutionProcessRunReason},
-    provider::{AgentInjection, Provider},
+    provider::Provider,
     requests::UpdateSession,
     scratch::{Scratch, ScratchType},
     session::{CreateSession, Session, SessionError},
+    session_command::{
+        NewSessionCommand, SessionCommand, SessionCommandConfig, SessionCommandIntent,
+    },
     workspace::{Workspace, WorkspaceError},
     workspace_repo::WorkspaceRepo,
 };
 use deployment::Deployment;
-use executors::{
-    actions::{
-        ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
-    },
-    profile::ExecutorConfig,
-};
+use executors::profile::ExecutorConfig;
 use serde::Deserialize;
 use services::services::container::ContainerService;
 use ts_rs::TS;
@@ -84,6 +82,7 @@ pub async fn create_session(
         &CreateSession {
             executor: payload.executor,
             name: payload.name,
+            parent_session_id: None,
         },
         Uuid::new_v4(),
         payload.workspace_id,
@@ -100,7 +99,13 @@ pub async fn update_session(
 ) -> Result<ResponseJson<ApiResponse<Session>>, ApiError> {
     let pool = &deployment.db().pool;
 
-    Session::update(pool, session.id, request.name.as_deref()).await?;
+    Session::update(
+        pool,
+        session.id,
+        request.name.as_deref(),
+        request.parent_session_id,
+    )
+    .await?;
 
     let updated = Session::find_by_id(pool, session.id)
         .await?
@@ -146,6 +151,12 @@ pub struct CreateFollowUpAttempt {
     #[serde(default)]
     #[ts(optional)]
     pub selected_provider_id: Option<Uuid>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub dedupe_key: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub intent: Option<SessionCommandIntent>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -160,7 +171,7 @@ pub async fn follow_up(
     State(deployment): State<DeploymentImpl>,
     headers: HeaderMap,
     Json(mut payload): Json<CreateFollowUpAttempt>,
-) -> Result<ResponseJson<ApiResponse<ExecutionProcess>>, ApiError> {
+) -> Result<ResponseJson<ApiResponse<SessionCommand>>, ApiError> {
     let pool = &deployment.db().pool;
 
     // `cdesktop team send` sets this header so the server can attribute the
@@ -278,16 +289,8 @@ pub async fn follow_up(
             .await?;
     }
 
-    let latest_session_info = CodingAgentTurn::find_latest_session_info(pool, session.id).await?;
-
     let prompt = payload.prompt;
     let prompt_byte_count = prompt.len();
-
-    let working_dir = session
-        .agent_working_dir
-        .as_ref()
-        .filter(|dir| !dir.is_empty())
-        .cloned();
 
     // Resolve the provider up front so we can both prefix the OpenCode model
     // id (see `Provider::prefix_opencode_model_id`) before the action_type is
@@ -295,7 +298,7 @@ pub async fn follow_up(
     // TODO(phase-G): map ProviderError variants to a structured ApiError code
     // (e.g. PROVIDER_MISSING_API_KEY) so the picker can render a "configure
     // API key for this provider" CTA instead of a generic 400.
-    let resolved_provider = if let Some(provider_id) = payload.selected_provider_id {
+    if let Some(provider_id) = payload.selected_provider_id {
         let provider = Provider::find_by_id(pool, provider_id)
             .await
             .map_err(|_| ApiError::BadRequest(format!("Provider '{provider_id}' not found")))?;
@@ -311,67 +314,46 @@ pub async fn follow_up(
             executor_config.model_id =
                 Some(provider.prefix_opencode_model_id(executor_config.executor, m));
         }
+    }
 
-        Some(provider)
-    } else {
-        None
-    };
-
-    let action_type = if let Some(info) = latest_session_info {
-        let is_reset = payload.retry_process_id.is_some();
-        ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
-            prompt: prompt.clone(),
-            session_id: info.session_id,
-            reset_to_message_id: if is_reset { info.message_id } else { None },
-            executor_config: executor_config.clone(),
-            working_dir: working_dir.clone(),
-        })
-    } else {
-        ExecutorActionType::CodingAgentInitialRequest(
-            executors::actions::coding_agent_initial::CodingAgentInitialRequest {
-                prompt,
-                executor_config: executor_config.clone(),
-                working_dir,
+    let intent = payload.intent.unwrap_or(SessionCommandIntent::Continue);
+    let (command, inserted) = SessionCommand::enqueue(
+        pool,
+        NewSessionCommand {
+            session_id: session.id,
+            dedupe_key: payload.dedupe_key,
+            intent: intent.clone(),
+            body: prompt,
+            config: SessionCommandConfig {
+                executor_config,
+                selected_provider_id: payload.selected_provider_id,
             },
-        )
-    };
-
-    // Build the spawn-time provider injection if a provider was selected for
-    // this message. `Provider::build_agent_injection` dispatches per agent —
-    // Codex emits env + ThreadStartParams overrides; every other agent uses
-    // env-only.
-    let injection = if let Some(provider) = resolved_provider {
-        let model_id = executor_config.model_id.as_deref().unwrap_or("");
-        provider
-            .build_agent_injection(executor_config.executor, model_id)
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?
-    } else {
-        AgentInjection::default()
-    };
-
-    let selected_provider_id_str = payload.selected_provider_id.map(|id| id.to_string());
-    let selected_model_id_str = executor_config.model_id.clone();
-
-    let action = {
-        let mut a = ExecutorAction::new(action_type, None);
-        if let Some(env) = injection.env {
-            a = a.with_provider_env(env);
+        },
+    )
+    .await?;
+    if inserted && intent == SessionCommandIntent::Replace {
+        SessionCommand::cancel_pending_except(pool, session.id, command.id).await?;
+        for process in ExecutionProcess::find_by_session_id(pool, session.id, false).await? {
+            if process.status == db::models::execution_process::ExecutionProcessStatus::Running
+                && process.run_reason == ExecutionProcessRunReason::CodingAgent
+            {
+                deployment
+                    .container()
+                    .stop_execution(
+                        &process,
+                        db::models::execution_process::ExecutionProcessStatus::Killed,
+                    )
+                    .await?;
+            }
         }
-        if let Some(codex) = injection.codex {
-            a = a.with_provider_codex(codex);
-        }
-        a.with_provider_selection(selected_provider_id_str, selected_model_id_str)
-    };
-
-    let execution_process = deployment
+    }
+    deployment
         .container()
-        .start_execution(
-            &workspace,
-            &session,
-            &action,
-            &ExecutionProcessRunReason::CodingAgent,
-        )
+        .dispatch_pending_commands(session.id)
         .await?;
+    let command = SessionCommand::find_by_id(pool, command.id)
+        .await?
+        .ok_or(ApiError::Database(sqlx::Error::RowNotFound))?;
 
     // Clear the draft follow-up scratch on successful spawn
     // This ensures the scratch is wiped even if the user navigates away quickly
@@ -403,7 +385,7 @@ pub async fn follow_up(
             .await;
     }
 
-    Ok(ResponseJson(ApiResponse::success(execution_process)))
+    Ok(ResponseJson(ApiResponse::success(command)))
 }
 
 pub async fn get_turn_selections(

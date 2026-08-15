@@ -7,6 +7,7 @@ use axum::{
 };
 use deployment::Deployment;
 use futures_util::StreamExt;
+use services::services::approvals::{ApprovalError, ApprovalInfo};
 use utils::{
     approvals::{ApprovalOutcome, ApprovalResponse},
     log_msg::LogMsg,
@@ -43,9 +44,22 @@ async fn respond_to_approval(
         }
         Err(e) => {
             tracing::error!("Failed to respond to approval: {:?}", e);
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(match e {
+                ApprovalError::NotFound => StatusCode::NOT_FOUND,
+                ApprovalError::AlreadyCompleted => StatusCode::CONFLICT,
+                ApprovalError::InvalidStatus | ApprovalError::ExecutionProcessMismatch => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            })
         }
     }
+}
+
+async fn list_pending_approvals(
+    State(deployment): State<DeploymentImpl>,
+) -> ResponseJson<ApiResponse<Vec<ApprovalInfo>>> {
+    ResponseJson(ApiResponse::success(deployment.approvals().pending_infos()))
 }
 
 async fn stream_approvals_ws(
@@ -108,6 +122,7 @@ async fn handle_approvals_ws(
 
 pub(super) fn router() -> Router<DeploymentImpl> {
     Router::new()
+        .route("/approvals", get(list_pending_approvals))
         .route("/approvals/{id}/respond", post(respond_to_approval))
         .route("/approvals/stream/ws", get(stream_approvals_ws))
 }

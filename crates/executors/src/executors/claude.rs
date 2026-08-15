@@ -275,6 +275,7 @@ impl ClaudeCode {
 /// Canonical Claude CLI model shorthand ids and display names.
 /// Single source of truth, also consumed by the Default provider in db.
 pub const DEFAULT_MODEL_IDS: &[(&str, &str)] = &[
+    ("fable", "Fable 5"),
     ("opus", "Opus"),
     ("opus[1m]", "Opus (1M context)"),
     ("sonnet", "Sonnet"),
@@ -290,7 +291,8 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
     let effort_options =
         ReasoningOption::from_names(["low", "medium", "high", "xhigh", "max"].map(String::from));
 
-    let supports_effort = |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") };
+    let supports_effort =
+        |id: &str| -> bool { id.contains("fable") || id.contains("opus") || id.contains("sonnet") };
 
     ExecutorDiscoveredOptions {
         model_selector: ModelSelectorConfig {

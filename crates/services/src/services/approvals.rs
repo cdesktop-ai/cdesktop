@@ -59,6 +59,8 @@ pub enum ApprovalError {
     NotFound,
     #[error("approval request already completed")]
     AlreadyCompleted,
+    #[error("approval belongs to a different execution process")]
+    ExecutionProcessMismatch,
     #[error("no executor session found for session_id: {0}")]
     NoExecutorSession(String),
     #[error("invalid approval status for this tool type")]
@@ -146,6 +148,10 @@ impl Approvals {
         req: ApprovalResponse,
     ) -> Result<(ApprovalOutcome, ToolContext), ApprovalError> {
         if let Some((_, p)) = self.pending.remove(id) {
+            if req.execution_process_id != p.execution_process_id {
+                self.pending.insert(id.to_string(), p);
+                return Err(ApprovalError::ExecutionProcessMismatch);
+            }
             if let Err(e) = Self::validate_approval_response(&req.status, p.is_question) {
                 self.pending.insert(id.to_string(), p);
                 return Err(e);
@@ -272,8 +278,9 @@ impl Approvals {
             .collect()
     }
 
-    fn pending_infos(&self) -> Vec<ApprovalInfo> {
-        self.pending
+    pub fn pending_infos(&self) -> Vec<ApprovalInfo> {
+        let mut pending = self
+            .pending
             .iter()
             .map(|entry| {
                 let p = entry.value();
@@ -286,6 +293,55 @@ impl Approvals {
                     timeout_at: p.timeout_at,
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        pending.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.approval_id.cmp(&b.approval_id))
+        });
+        pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mismatched_execution_process_does_not_consume_approval() {
+        let approvals = Approvals::new();
+        let request = ApprovalRequest::new("ExitPlanMode".to_string(), Uuid::new_v4());
+        let approval_id = request.id.clone();
+        let execution_process_id = request.execution_process_id;
+        let (_request, _waiter) = approvals
+            .create_with_waiter(request, false)
+            .await
+            .expect("approval should be created");
+
+        let error = approvals
+            .respond(
+                &approval_id,
+                ApprovalResponse {
+                    execution_process_id: Uuid::new_v4(),
+                    status: ApprovalOutcome::Approved,
+                },
+            )
+            .await
+            .expect_err("mismatched process must be rejected");
+
+        assert!(matches!(error, ApprovalError::ExecutionProcessMismatch));
+        assert_eq!(approvals.pending_infos().len(), 1);
+
+        approvals
+            .respond(
+                &approval_id,
+                ApprovalResponse {
+                    execution_process_id,
+                    status: ApprovalOutcome::Approved,
+                },
+            )
+            .await
+            .expect("the original approval should remain pending");
+        assert!(approvals.pending_infos().is_empty());
     }
 }

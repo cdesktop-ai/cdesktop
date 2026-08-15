@@ -192,7 +192,7 @@ export type RoutineRunStatus = "pending" | "running" | "done" | "skipped" | "fai
 
 export type RunNowResponse = { routine_run: RoutineRun, workspace_id: string | null, skipped: boolean, skip_reason: string | null, };
 
-export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
+export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, parent_session_id: string | null, created_at: string, updated_at: string, };
 
 export type ExecutionProcess = { id: string, session_id: string, run_reason: ExecutionProcessRunReason, executor_action: ExecutorAction, status: ExecutionProcessStatus, exit_code: bigint | null, 
 /**
@@ -366,7 +366,7 @@ create_new_branch?: boolean,
  * Provider to route this message through. `None` = inherit from the
  * recipient's last execution (same fallback as `executor_config`).
  */
-selected_provider_id?: string, };
+selected_provider_id?: string, dedupe_key?: string, intent?: SessionCommandIntent, };
 
 export type SpawnTeammateRequest = { 
 /**
@@ -543,7 +543,7 @@ export type RepoBranchStatus = { repo_id: string, repo_name: string, commits_beh
 
 export type UpdateWorkspace = { archived: boolean | null, pinned: boolean | null, name: string | null, };
 
-export type UpdateSession = { name: string | null, };
+export type UpdateSession = { name: string | null, parent_session_id: string | null, };
 
 export type ReorderPinsRequest = { ordered_ids: Array<string>, };
 
@@ -639,21 +639,17 @@ export type SendMessageShortcut = "ModifierEnter" | "Enter";
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 
-export type QueuedMessage = { 
-/**
- * The session this message is queued for
- */
-session_id: string, 
-/**
- * The follow-up data (message + variant)
- */
-data: DraftFollowUpData, 
-/**
- * Timestamp when the message was queued
- */
-queued_at: string, };
+export type QueuedMessage = { session_id: string, data: DraftFollowUpData, queued_at: string, };
 
 export type QueueStatus = { "status": "empty" } | { "status": "queued", message: QueuedMessage, };
+
+export type SessionCommand = { id: string, session_id: string, dedupe_key: string | null, intent: SessionCommandIntent, body: string, config: SessionCommandConfig, state: SessionCommandState, execution_process_id: string | null, created_at: string, finished_at: string | null, };
+
+export type SessionCommandConfig = { executor_config: ExecutorConfig, selected_provider_id?: string, };
+
+export enum SessionCommandIntent { continue = "continue", replace = "replace" }
+
+export enum SessionCommandState { pending = "pending", claimed = "claimed", done = "done", failed = "failed", cancelled = "cancelled" }
 
 export type ConflictOp = "rebase" | "merge" | "cherry_pick" | "revert";
 
@@ -765,9 +761,9 @@ export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null,
 
 export type SandboxMode = "auto" | "read-only" | "workspace-write" | "danger-full-access";
 
-export type AskForApproval = "unless-trusted" | "on-failure" | "on-request" | "never";
+export type AskForApproval = "unless-trusted" | "on-request" | "never";
 
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ReasoningSummary = "auto" | "concise" | "detailed" | "none";
 

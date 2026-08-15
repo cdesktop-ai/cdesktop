@@ -289,6 +289,15 @@ impl ExecutionProcess {
         Ok(count > 0)
     }
 
+    pub async fn count_running_coding_agents(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM execution_processes \
+             WHERE status = 'running' AND run_reason = 'codingagent'",
+        )
+        .fetch_one(pool)
+        .await
+    }
+
     /// Check if there are running processes (excluding dev servers) for a workspace (across all sessions)
     pub async fn has_running_non_dev_server_processes_for_workspace(
         pool: &SqlitePool,

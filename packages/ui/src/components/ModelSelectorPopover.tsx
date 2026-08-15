@@ -50,6 +50,7 @@ export interface ModelSelectorPopoverProps {
   expandedProviderId?: string;
   onExpandedProviderIdChange?: (id: string) => void;
   resolvedTheme?: 'light' | 'dark';
+  allowCustomModelId?: boolean;
 }
 
 const MODEL_LIST_PAGE_SIZE = 8;
@@ -369,6 +370,7 @@ export function ModelSelectorPopover({
   expandedProviderId = '',
   onExpandedProviderIdChange,
   resolvedTheme = 'light',
+  allowCustomModelId = false,
 }: ModelSelectorPopoverProps) {
   const { t } = useTranslation('common');
   const models = config.models;
@@ -408,7 +410,7 @@ export function ModelSelectorPopover({
       selectedProviderId,
       selectedModelId
     );
-    showSearch = models.length > MODEL_LIST_PAGE_SIZE;
+    showSearch = allowCustomModelId || models.length > MODEL_LIST_PAGE_SIZE;
 
     content = (
       <ModelList
@@ -459,9 +461,30 @@ export function ModelSelectorPopover({
             {showSearch && (
               <div className="border-t border-border">
                 <DropdownMenuSearchInput
-                  placeholder="Filter by name or ID..."
+                  placeholder={
+                    allowCustomModelId
+                      ? 'Filter or enter an exact model ID...'
+                      : 'Filter by name or ID...'
+                  }
                   value={searchQuery}
                   onValueChange={onSearchChange}
+                  onKeyDown={(event) => {
+                    if (!allowCustomModelId || event.key !== 'Enter') return;
+                    const modelId = searchQuery.trim();
+                    if (!modelId) return;
+                    const providerId =
+                      selectedProviderId?.toLowerCase() ?? null;
+                    const exists = models.some(
+                      (model) =>
+                        model.id.toLowerCase() === modelId.toLowerCase() &&
+                        (!providerId ||
+                          model.provider_id?.toLowerCase() === providerId)
+                    );
+                    if (exists) return;
+                    event.preventDefault();
+                    onModelSelect(modelId, selectedProviderId ?? undefined);
+                    onOpenChange(false);
+                  }}
                 />
               </div>
             )}

@@ -1064,6 +1064,7 @@ mod codex_injection_tests {
             claude: ClaudePayload::default(),
             codex: CodexPayload {
                 base_url: base_url.map(|s| s.to_string()),
+                api_key: None,
                 env: codex_env,
             },
             opencode: OpencodePayload::default(),

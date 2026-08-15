@@ -108,27 +108,30 @@ jobs:
             new_tag="v${new_version}-${timestamp}"
           fi
 
-          # Update npx-cli package.json to match
-          (
-            cd npx-cli
-            npm version $new_version --no-git-tag-version --allow-same-version
-          )
+          if [[ "${{ github.event.inputs.version_type }}" != "none" ]]; then
+            # Keep every published package aligned only when this workflow is
+            # actually changing the version. The retry path must leave the
+            # existing fork and workspace crate versions untouched.
+            (
+              cd npx-cli
+              npm version $new_version --no-git-tag-version --allow-same-version
+            )
 
-          # Update web app package.json to match
-          (
-            cd packages/local-web
-            npm version $new_version --no-git-tag-version --allow-same-version
-          )
+            (
+              cd packages/local-web
+              npm version $new_version --no-git-tag-version --allow-same-version
+            )
 
-          cargo set-version --workspace "$new_version"
+            cargo set-version --workspace "$new_version"
 
-          node -e "
-            const fs = require('fs');
-            const path = 'crates/tauri-app/tauri.conf.json';
-            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
-            conf.version = '$new_version';
-            fs.writeFileSync(path, JSON.stringify(conf, null, 2) + '\n');
-          "
+            node -e "
+              const fs = require('fs');
+              const path = 'crates/tauri-app/tauri.conf.json';
+              const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+              conf.version = '$new_version';
+              fs.writeFileSync(path, JSON.stringify(conf, null, 2) + '\n');
+            "
+          fi
 
           echo "New version: $new_version"
           echo "new_version=$new_version" >> $GITHUB_OUTPUT
@@ -193,6 +196,7 @@ jobs:
     needs: [bump-version, build-frontend]
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       # Platform matrix - keep target/name in sync with package-npx-cli job
       matrix:
         include:

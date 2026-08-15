@@ -24,6 +24,7 @@ pub struct Session {
     pub name: Option<String>,
     pub executor: Option<String>,
     pub agent_working_dir: Option<String>,
+    pub parent_session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -32,6 +33,7 @@ pub struct Session {
 pub struct CreateSession {
     pub executor: Option<String>,
     pub name: Option<String>,
+    pub parent_session_id: Option<Uuid>,
 }
 
 impl Session {
@@ -43,6 +45,7 @@ impl Session {
                       name,
                       executor,
                       agent_working_dir,
+                      parent_session_id AS "parent_session_id: Uuid",
                       created_at AS "created_at!: DateTime<Utc>",
                       updated_at AS "updated_at!: DateTime<Utc>"
                FROM sessions
@@ -61,6 +64,7 @@ impl Session {
                       name,
                       executor,
                       agent_working_dir,
+                      parent_session_id AS "parent_session_id: Uuid",
                       created_at AS "created_at!: DateTime<Utc>",
                       updated_at AS "updated_at!: DateTime<Utc>"
                FROM sessions
@@ -85,6 +89,7 @@ impl Session {
                       s.name,
                       s.executor,
                       s.agent_working_dir,
+                      s.parent_session_id AS "parent_session_id: Uuid",
                       s.created_at AS "created_at!: DateTime<Utc>",
                       s.updated_at AS "updated_at!: DateTime<Utc>"
                FROM sessions s
@@ -116,6 +121,7 @@ impl Session {
                       s.name,
                       s.executor,
                       s.agent_working_dir,
+                      s.parent_session_id AS "parent_session_id: Uuid",
                       s.created_at AS "created_at!: DateTime<Utc>",
                       s.updated_at AS "updated_at!: DateTime<Utc>"
                FROM sessions s
@@ -146,6 +152,7 @@ impl Session {
                       name,
                       executor,
                       agent_working_dir,
+                      parent_session_id,
                       created_at,
                       updated_at
                FROM sessions
@@ -176,20 +183,22 @@ impl Session {
 
         Ok(sqlx::query_as!(
             Session,
-            r#"INSERT INTO sessions (id, workspace_id, name, executor, agent_working_dir)
-               VALUES ($1, $2, $3, $4, $5)
+            r#"INSERT INTO sessions (id, workspace_id, name, executor, agent_working_dir, parent_session_id)
+               VALUES ($1, $2, $3, $4, $5, $6)
                RETURNING id AS "id!: Uuid",
                          workspace_id AS "workspace_id!: Uuid",
                          name,
                          executor,
                          agent_working_dir,
+                         parent_session_id AS "parent_session_id: Uuid",
                          created_at AS "created_at!: DateTime<Utc>",
                          updated_at AS "updated_at!: DateTime<Utc>""#,
             id,
             workspace_id,
             name,
             data.executor,
-            agent_working_dir
+            agent_working_dir,
+            data.parent_session_id
         )
         .fetch_one(pool)
         .await?)
@@ -216,17 +225,22 @@ impl Session {
         pool: &SqlitePool,
         id: Uuid,
         name: Option<&str>,
+        parent_session_id: Option<Uuid>,
     ) -> Result<(), sqlx::Error> {
         let name_value = name.filter(|s| !s.is_empty());
         let name_provided = name.is_some();
+        let parent_provided = parent_session_id.is_some();
 
         sqlx::query!(
             r#"UPDATE sessions SET
                 name = CASE WHEN $1 THEN $2 ELSE name END,
+                parent_session_id = CASE WHEN $3 THEN $4 ELSE parent_session_id END,
                 updated_at = datetime('now', 'subsec')
-            WHERE id = $3"#,
+            WHERE id = $5"#,
             name_provided,
             name_value,
+            parent_provided,
+            parent_session_id,
             id
         )
         .execute(pool)

@@ -68,6 +68,7 @@ import {
   TokenResponse,
   CurrentUserResponse,
   QueueStatus,
+  SessionCommand,
   PrCommentsResponse,
   MergeWorkspaceRequest,
   PushWorkspaceRequest,
@@ -350,12 +351,12 @@ export const sessionsApi = {
   followUp: async (
     sessionId: string,
     data: CreateFollowUpAttempt
-  ): Promise<ExecutionProcess> => {
+  ): Promise<SessionCommand> => {
     const response = await makeRequest(`/api/sessions/${sessionId}/follow-up`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
-    return handleApiResponse<ExecutionProcess>(response);
+    return handleApiResponse<SessionCommand>(response);
   },
 
   startReview: async (
@@ -1624,6 +1625,21 @@ export const queueApi = {
   getStatus: async (sessionId: string): Promise<QueueStatus> => {
     const response = await makeRequest(`/api/sessions/${sessionId}/queue`);
     return handleApiResponse<QueueStatus>(response);
+  },
+};
+
+export interface SightMeshUpdateStatus {
+  managed: boolean;
+  status: string;
+  pending_version: string | null;
+  active_version: string | null;
+  updated_at: number | null;
+}
+
+export const maintenanceApi = {
+  getUpdateStatus: async (): Promise<SightMeshUpdateStatus> => {
+    const response = await makeRequest('/api/maintenance/update');
+    return handleApiResponse<SightMeshUpdateStatus>(response);
   },
 };
 

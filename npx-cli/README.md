@@ -17,6 +17,32 @@
   <video src="https://github.com/user-attachments/assets/d57bb67f-185b-4e19-b386-64406578c8df" controls></video>
 </p>
 
+## SightMesh fork
+
+This fork keeps cdesktop as the visible local UI while adding the control surfaces required by [SightMesh](https://github.com/clarkipeng/sightmesh):
+
+- a native snapshot API for pending plan and tool approvals;
+- approval responses bound to the exact execution process so a stale or mismatched response cannot consume a request;
+- Codex app-server and event protocol types updated to 0.147;
+- current Claude and Codex model shortcuts, Codex `max` reasoning, and exact free-form model IDs;
+- a native `cdesktop team manager` command for teammate questions, blockers, status, and completion messages;
+- per-session immediate steering that leaves peer sessions and dev servers running;
+- one bounded normalized-log snapshot API for compact fleet inspection;
+- one-form submission for every question in a multi-question request;
+- the upstream websocket approval stream and ordinary cdesktop UI remain compatible.
+
+Build and install this fork locally:
+
+```bash
+git clone https://github.com/clarkipeng/cdesktop.git
+cd cdesktop
+pnpm install --frozen-lockfile
+pnpm run build:npx
+npm install --global ./npx-cli
+```
+
+The CLI package and backend `/api/info` version include a `-sightmesh` suffix so both the installed command and active runtime can be distinguished from upstream. Local release builds explicitly disable the Sentry upload plugin. The fork does not copy or rotate Claude or Codex credentials. It launches the locally authenticated agent CLIs in the same way as upstream.
+
 ## Sponsors
 
 Want your logo featured here? [Get in touch.](mailto:onlylakehouse@163.com)

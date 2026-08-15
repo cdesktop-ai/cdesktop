@@ -2,11 +2,17 @@ use axum::{
     Extension, Json, Router, extract::State, middleware::from_fn_with_state,
     response::Json as ResponseJson, routing::get,
 };
-use db::models::{scratch::DraftFollowUpData, session::Session};
+use db::models::{
+    scratch::{DraftFollowUpData, Scratch, ScratchType},
+    session::Session,
+    session_command::{
+        NewSessionCommand, SessionCommand, SessionCommandConfig, SessionCommandIntent,
+    },
+};
 use deployment::Deployment;
 use executors::profile::ExecutorConfig;
 use serde::Deserialize;
-use services::services::queued_message::QueueStatus;
+use services::services::{container::ContainerService, queued_message::QueueStatus};
 use ts_rs::TS;
 use utils::response::ApiResponse;
 
@@ -30,9 +36,30 @@ async fn queue_message(
         executor_config: payload.executor_config,
     };
 
-    let queued = deployment
-        .queued_message_service()
-        .queue_message(session.id, data);
+    let _ = SessionCommand::enqueue(
+        &deployment.db().pool,
+        NewSessionCommand {
+            session_id: session.id,
+            dedupe_key: None,
+            intent: SessionCommandIntent::Continue,
+            body: data.message,
+            config: SessionCommandConfig {
+                executor_config: data.executor_config,
+                selected_provider_id: None,
+            },
+        },
+    )
+    .await?;
+    deployment
+        .container()
+        .dispatch_pending_commands(session.id)
+        .await?;
+    Scratch::delete(
+        &deployment.db().pool,
+        session.id,
+        &ScratchType::DraftFollowUp,
+    )
+    .await?;
 
     deployment
         .track_if_analytics_allowed(
@@ -44,9 +71,9 @@ async fn queue_message(
         )
         .await;
 
-    Ok(ResponseJson(ApiResponse::success(QueueStatus::Queued {
-        message: queued,
-    })))
+    Ok(ResponseJson(ApiResponse::success(
+        queue_status(&deployment, session.id).await?,
+    )))
 }
 
 /// Cancel a queued follow-up message
@@ -54,9 +81,7 @@ async fn cancel_queued_message(
     Extension(session): Extension<Session>,
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
-    deployment
-        .queued_message_service()
-        .cancel_queued(session.id);
+    SessionCommand::cancel_pending(&deployment.db().pool, session.id).await?;
 
     deployment
         .track_if_analytics_allowed(
@@ -76,9 +101,23 @@ async fn get_queue_status(
     Extension(session): Extension<Session>,
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<QueueStatus>>, ApiError> {
-    let status = deployment.queued_message_service().get_status(session.id);
+    let status = queue_status(&deployment, session.id).await?;
 
     Ok(ResponseJson(ApiResponse::success(status)))
+}
+
+async fn queue_status(
+    deployment: &DeploymentImpl,
+    session_id: uuid::Uuid,
+) -> Result<QueueStatus, ApiError> {
+    let Some(command) = SessionCommand::pending(&deployment.db().pool, session_id)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(QueueStatus::Empty);
+    };
+    Ok(QueueStatus::from_command(command))
 }
 
 pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {

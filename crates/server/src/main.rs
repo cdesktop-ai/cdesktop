@@ -30,6 +30,10 @@ pub enum VibeKanbanError {
     Other(#[from] AnyhowError),
 }
 
+fn browser_launch_enabled(debug_assertions: bool, no_browser: bool) -> bool {
+    !debug_assertions && !no_browser
+}
+
 #[tokio::main]
 async fn main() -> Result<(), VibeKanbanError> {
     // Install rustls crypto provider before any TLS operations
@@ -93,6 +97,11 @@ async fn main() -> Result<(), VibeKanbanError> {
         .await
         .map_err(DeploymentError::from)?;
     deployment
+        .container()
+        .dispatch_all_pending_commands()
+        .await
+        .map_err(DeploymentError::from)?;
+    deployment
         .track_if_analytics_allowed("session_start", serde_json::json!({}))
         .await;
     // Preload global executor options cache for all executors with DEFAULT presets
@@ -150,8 +159,11 @@ async fn main() -> Result<(), VibeKanbanError> {
 
     let app_router = routes::router(deployment.clone());
 
-    // Production only: open browser
-    if !cfg!(debug_assertions) {
+    // Production only: open the browser unless a service manager owns UI launch.
+    if browser_launch_enabled(
+        cfg!(debug_assertions),
+        std::env::var_os("CDESKTOP_NO_BROWSER").is_some(),
+    ) {
         tracing::info!("Opening browser...");
         let browser_port = actual_main_port;
         tokio::spawn(async move {
@@ -204,6 +216,21 @@ async fn main() -> Result<(), VibeKanbanError> {
     perform_cleanup_actions(&deployment).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::browser_launch_enabled;
+
+    #[test]
+    fn managed_service_can_disable_browser_launch() {
+        assert!(!browser_launch_enabled(false, true));
+    }
+
+    #[test]
+    fn interactive_release_still_opens_browser() {
+        assert!(browser_launch_enabled(false, false));
+    }
 }
 
 pub async fn shutdown_signal() {

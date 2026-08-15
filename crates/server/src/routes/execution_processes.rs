@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use anyhow;
 use axum::{
     Extension, Router,
@@ -9,10 +11,13 @@ use axum::{
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessStatus},
     execution_process_repo_state::ExecutionProcessRepoState,
+    execution_process_stop_operation::{
+        StopExecutionOperation, StopExecutionOperationState, StopExecutionOutcome,
+    },
 };
 use deployment::Deployment;
 use futures_util::{StreamExt, TryStreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use services::services::container::ContainerService;
 use utils::{log_msg::LogMsg, response::ApiResponse};
 use uuid::Uuid;
@@ -26,6 +31,10 @@ use crate::{
     },
 };
 
+/// Identifies the server process that owns a pending keyed stop. A different
+/// value after restart can reconcile, but never re-execute, an orphaned stop.
+static STOP_OPERATION_INSTANCE_ID: LazyLock<Uuid> = LazyLock::new(Uuid::new_v4);
+
 #[derive(Debug, Deserialize)]
 struct SessionExecutionProcessQuery {
     pub session_id: Uuid,
@@ -34,11 +43,115 @@ struct SessionExecutionProcessQuery {
     pub show_soft_deleted: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct StopExecutionProcessRequest {
+    /// Caller-owned, deterministic key used to replay a lost stop response.
+    #[serde(default)]
+    dedupe_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NormalizedLogSnapshot {
+    entries: Vec<serde_json::Value>,
+    patch_count: usize,
+    skipped_patch_count: usize,
+    complete: bool,
+}
+
+fn apply_normalized_message(
+    document: &mut serde_json::Value,
+    message: LogMsg,
+    patch_count: &mut usize,
+    skipped_patch_count: &mut usize,
+) -> bool {
+    match message {
+        LogMsg::JsonPatch(patch) => {
+            if json_patch::patch(document, &patch).is_ok() {
+                *patch_count += 1;
+            } else {
+                *skipped_patch_count += 1;
+            }
+            false
+        }
+        LogMsg::Finished => true,
+        _ => false,
+    }
+}
+
 async fn get_execution_process_by_id(
     Extension(execution_process): Extension<ExecutionProcess>,
     State(_deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<ExecutionProcess>>, ApiError> {
     Ok(ResponseJson(ApiResponse::success(execution_process)))
+}
+
+async fn list_execution_processes_by_session(
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<SessionExecutionProcessQuery>,
+) -> Result<ResponseJson<ApiResponse<Vec<ExecutionProcess>>>, ApiError> {
+    let processes = ExecutionProcess::find_by_session_id(
+        &deployment.db().pool,
+        query.session_id,
+        query.show_soft_deleted.unwrap_or(false),
+    )
+    .await?;
+    Ok(ResponseJson(ApiResponse::success(processes)))
+}
+
+async fn get_normalized_log_snapshot(
+    Extension(execution_process): Extension<ExecutionProcess>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<NormalizedLogSnapshot>>, ApiError> {
+    let Some(mut stream) = deployment
+        .container()
+        .stream_normalized_logs(&execution_process.id)
+        .await
+    else {
+        return Err(ApiError::BadRequest(
+            "normalized logs are unavailable for this execution".into(),
+        ));
+    };
+
+    let mut document = serde_json::json!({ "entries": [] });
+    let mut patch_count = 0;
+    let mut skipped_patch_count = 0;
+    let mut complete = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+    while patch_count < 100_000 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let next = tokio::time::timeout(
+            remaining.min(std::time::Duration::from_millis(50)),
+            stream.next(),
+        )
+        .await;
+        let Ok(Some(message)) = next else {
+            break;
+        };
+        if apply_normalized_message(
+            &mut document,
+            message?,
+            &mut patch_count,
+            &mut skipped_patch_count,
+        ) {
+            complete = true;
+            break;
+        }
+    }
+
+    let entries = document
+        .get_mut("entries")
+        .and_then(serde_json::Value::as_array_mut)
+        .map(std::mem::take)
+        .unwrap_or_default();
+    Ok(ResponseJson(ApiResponse::success(NormalizedLogSnapshot {
+        entries,
+        patch_count,
+        skipped_patch_count,
+        complete,
+    })))
 }
 
 async fn stream_raw_logs_ws(
@@ -203,13 +316,105 @@ async fn handle_normalized_logs_ws(
 async fn stop_execution_process(
     Extension(execution_process): Extension<ExecutionProcess>,
     State(deployment): State<DeploymentImpl>,
+    payload: Option<axum::Json<StopExecutionProcessRequest>>,
 ) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
-    deployment
+    let Some(dedupe_key) = payload
+        .map(|axum::Json(request)| request.dedupe_key)
+        .flatten()
+    else {
+        deployment
+            .container()
+            .stop_execution(&execution_process, ExecutionProcessStatus::Killed)
+            .await?;
+
+        return Ok(ResponseJson(ApiResponse::success(())));
+    };
+    if dedupe_key.is_empty() {
+        return Err(ApiError::BadRequest("dedupe_key must not be empty".into()));
+    }
+
+    let pool = &deployment.db().pool;
+    let instance_id = *STOP_OPERATION_INSTANCE_ID;
+    let state =
+        StopExecutionOperation::begin(pool, execution_process.id, &dedupe_key, instance_id).await?;
+    match state {
+        StopExecutionOperationState::Complete(outcome) => return stop_outcome_response(outcome),
+        StopExecutionOperationState::Owner => {}
+        // Terminal execution status is only written after cancellation/kill
+        // succeeds. Therefore an orphaned pending request may be accepted
+        // only when that durable side-effect boundary was crossed.
+        StopExecutionOperationState::Pending {
+            owned_by_current_instance: true,
+        } => {
+            // 425 is deliberately distinct from the durable 409 rejection:
+            // retry this exact key until the owner publishes its outcome.
+            return Err(ApiError::TooEarly(
+                "The original stop request is still in progress; retry the same dedupe_key.".into(),
+            ));
+        }
+        StopExecutionOperationState::Pending {
+            owned_by_current_instance: false,
+        } => {
+            let outcome = orphaned_stop_outcome();
+            let outcome = StopExecutionOperation::complete(
+                pool,
+                execution_process.id,
+                &dedupe_key,
+                outcome,
+                instance_id,
+            )
+            .await?;
+            return stop_outcome_response(outcome);
+        }
+    }
+
+    let outcome = match deployment
         .container()
         .stop_execution(&execution_process, ExecutionProcessStatus::Killed)
-        .await?;
+        .await
+    {
+        Ok(()) => StopExecutionOutcome::Accepted,
+        Err(error) => {
+            tracing::warn!(
+                execution_process_id = %execution_process.id,
+                "keyed stop request rejected: {error}"
+            );
+            StopExecutionOutcome::Rejected
+        }
+    };
+    let outcome = StopExecutionOperation::complete(
+        pool,
+        execution_process.id,
+        &dedupe_key,
+        outcome,
+        instance_id,
+    )
+    .await?;
+    stop_outcome_response(outcome)
+}
 
-    Ok(ResponseJson(ApiResponse::success(())))
+fn stop_outcome_response(
+    outcome: StopExecutionOutcome,
+) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    match outcome {
+        StopExecutionOutcome::Accepted => Ok(ResponseJson(ApiResponse::success(()))),
+        StopExecutionOutcome::Rejected => Err(ApiError::Conflict(
+            "The original stop request was rejected.".into(),
+        )),
+        StopExecutionOutcome::Interrupted => Err(ApiError::StopInterrupted(
+            "The original stop owner ended before its result was durably known; reconcile this key without issuing another stop."
+                .into(),
+        )),
+    }
+}
+
+fn orphaned_stop_outcome() -> StopExecutionOutcome {
+    // A terminal execution row can come from the independent exit monitor,
+    // not this stop operation. Without a durable process-controller identity,
+    // it cannot prove this key performed the side effect. Preserve safety by
+    // recording a distinct terminal interruption rather than inferring either
+    // acceptance or rejection.
+    StopExecutionOutcome::Interrupted
 }
 
 async fn stream_execution_processes_by_session_ws(
@@ -288,6 +493,7 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/", get(get_execution_process_by_id))
         .route("/stop", post(stop_execution_process))
         .route("/repo-states", get(get_execution_process_repo_states))
+        .route("/normalized-snapshot", get(get_normalized_log_snapshot))
         .route("/raw-logs/ws", get(stream_raw_logs_ws))
         .route("/normalized-logs/ws", get(stream_normalized_logs_ws))
         .layer(from_fn_with_state(
@@ -296,6 +502,7 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         ));
 
     let workspaces_router = Router::new()
+        .route("/", get(list_execution_processes_by_session))
         .route(
             "/stream/session/ws",
             get(stream_execution_processes_by_session_ws),
@@ -303,4 +510,78 @@ pub(super) fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .nest("/{id}", workspace_id_router);
 
     Router::new().nest("/execution-processes", workspaces_router)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_snapshot_coalesces_streaming_replacements() {
+        let mut document = serde_json::json!({ "entries": [] });
+        let mut applied = 0;
+        let mut skipped = 0;
+        for patch in [
+            serde_json::json!([{
+                "op": "add",
+                "path": "/entries/0",
+                "value": { "content": "hel" }
+            }]),
+            serde_json::json!([{
+                "op": "replace",
+                "path": "/entries/0",
+                "value": { "content": "hello" }
+            }]),
+        ] {
+            let message =
+                LogMsg::JsonPatch(serde_json::from_value(patch).expect("valid JSON patch fixture"));
+            assert!(!apply_normalized_message(
+                &mut document,
+                message,
+                &mut applied,
+                &mut skipped,
+            ));
+        }
+
+        assert_eq!(applied, 2);
+        assert_eq!(skipped, 0);
+        assert_eq!(document["entries"][0]["content"], "hello");
+        assert!(apply_normalized_message(
+            &mut document,
+            LogMsg::Finished,
+            &mut applied,
+            &mut skipped,
+        ));
+    }
+
+    #[test]
+    fn orphaned_intent_never_infers_acceptance_from_natural_exit_status() {
+        for _natural_status in [
+            ExecutionProcessStatus::Running,
+            ExecutionProcessStatus::Completed,
+            ExecutionProcessStatus::Failed,
+        ] {
+            assert_eq!(orphaned_stop_outcome(), StopExecutionOutcome::Interrupted);
+        }
+    }
+
+    #[test]
+    fn keyed_stop_outcomes_keep_rejection_and_interruption_distinct() {
+        assert!(matches!(
+            stop_outcome_response(StopExecutionOutcome::Rejected),
+            Err(ApiError::Conflict(_))
+        ));
+        assert!(matches!(
+            stop_outcome_response(StopExecutionOutcome::Interrupted),
+            Err(ApiError::StopInterrupted(_))
+        ));
+        assert!(stop_outcome_response(StopExecutionOutcome::Accepted).is_ok());
+    }
+
+    #[test]
+    fn omitted_dedupe_key_preserves_the_legacy_stop_request() {
+        let request: StopExecutionProcessRequest =
+            serde_json::from_value(serde_json::json!({})).expect("empty stop request is valid");
+        assert!(request.dedupe_key.is_none());
+    }
 }
