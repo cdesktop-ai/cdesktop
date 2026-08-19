@@ -291,10 +291,10 @@ function testWorkflowContract() {
   assert.match(workflow, /github-release-assets\.mjs/);
   assert.match(workflow, /needs: \[bump-version, package-npx-cli\]/);
   const licenseCopyIndex = workflow.indexOf("\n          cp ../LICENSE LICENSE");
+  const npmPackIndex = workflow.indexOf("\n          npm pack", licenseCopyIndex);
   assert.notEqual(licenseCopyIndex, -1);
-  assert.ok(
-    licenseCopyIndex < workflow.indexOf("\n          npm pack", licenseCopyIndex),
-  );
+  assert.notEqual(npmPackIndex, -1);
+  assert.ok(licenseCopyIndex < npmPackIndex);
 
   for (const platform of PLATFORMS) {
     for (const binary of BINARIES) {
