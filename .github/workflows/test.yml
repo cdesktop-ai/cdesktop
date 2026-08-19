@@ -36,7 +36,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       backend: ${{ steps.filter.outputs.backend }}
       backend-remote: ${{ steps.filter.outputs['backend-remote'] }}
-      release-distribution: ${{ steps.filter.outputs.release-distribution }}
+      release-distribution: ${{ steps.filter.outputs['release-distribution'] }}
       tauri: ${{ steps.filter.outputs.tauri }}
     steps:
       - uses: actions/checkout@v6
@@ -172,7 +172,7 @@ jobs:
 
   release-distribution-checks:
     needs: changes
-    if: always() && (needs.changes.outputs.release-distribution == 'true' || needs.changes.result == 'skipped')
+    if: always() && (needs.changes.outputs['release-distribution'] == 'true' || needs.changes.result == 'skipped')
     runs-on: *runner_label
     steps:
       - uses: actions/checkout@v6
