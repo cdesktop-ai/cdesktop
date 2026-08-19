@@ -15,6 +15,12 @@ import { runTeam } from "./team";
 
 const CLI_VERSION: string = require("../package.json").version;
 
+type BinaryArchiveProvider = (
+  platform: string,
+  binaryName: string,
+  onProgress?: (downloaded: number, total: number) => void,
+) => Promise<string>;
+
 type RootOptions = {
   desktop?: boolean;
 };
@@ -117,13 +123,13 @@ function buildMcpArgs(args: string[]): string[] {
   return args.length > 0 ? args : ["--mode", "global"];
 }
 
-async function extractAndRun(
+export async function extractAndRun(
   baseName: string,
   launch: (binPath: string) => void,
+  archiveProvider: BinaryArchiveProvider = ensureBinary,
 ): Promise<void> {
   const binName = getBinaryName(baseName);
   const binPath = path.join(versionCacheDir, binName);
-  const zipPath = path.join(versionCacheDir, `${baseName}.zip`);
 
   // Clean old binary if exists
   try {
@@ -137,17 +143,23 @@ async function extractAndRun(
     }
   }
 
-  // Download if not cached
-  if (!fs.existsSync(zipPath)) {
-    console.error(`Downloading ${baseName}...`);
-    try {
-      await ensureBinary(platformDir, baseName, showProgress);
-      console.error(""); // newline after progress
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`\nDownload failed: ${msg}`);
-      process.exit(1);
+  let zipPath: string;
+  try {
+    if (!LOCAL_DEV_MODE) {
+      console.error(`Downloading ${baseName}...`);
     }
+    zipPath = await archiveProvider(platformDir, baseName, showProgress);
+    if (!LOCAL_DEV_MODE) {
+      console.error(""); // newline after progress
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!LOCAL_DEV_MODE) {
+      console.error(`\nDownload failed: ${msg}`);
+    } else {
+      console.error(`Archive lookup failed: ${msg}`);
+    }
+    process.exit(1);
   }
 
   // Extract
@@ -322,11 +334,13 @@ async function main(): Promise<void> {
   cli.parse(normalizeArgv(process.argv));
 }
 
-main().catch((err: unknown) => {
-  const msg = err instanceof Error ? err.message : String(err);
-  console.error("Fatal error:", msg);
-  if (process.env.CDESKTOP_DEBUG && err instanceof Error) {
-    console.error(err.stack);
-  }
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("Fatal error:", msg);
+    if (process.env.CDESKTOP_DEBUG && err instanceof Error) {
+      console.error(err.stack);
+    }
+    process.exit(1);
+  });
+}

@@ -4,9 +4,11 @@ on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - .github/workflows/**
-      - '!.github/workflows/test.yml'
+    paths:
+      - '**'
+      - '!.github/workflows/**'
+      - '.github/workflows/pre-release.yml'
+      - '.github/workflows/test.yml'
   push:
     branches:
       - main
@@ -34,6 +36,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       backend: ${{ steps.filter.outputs.backend }}
       backend-remote: ${{ steps.filter.outputs['backend-remote'] }}
+      release-distribution: ${{ steps.filter.outputs.release-distribution }}
       tauri: ${{ steps.filter.outputs.tauri }}
     steps:
       - uses: actions/checkout@v6
@@ -116,6 +119,14 @@ jobs:
               - 'package.json'
               - '.github/workflows/test.yml'
               - '.github/actions/**'
+            release-distribution:
+              - 'npx-cli/**'
+              - 'scripts/github-release-assets.mjs'
+              - 'scripts/test-release-contract.mjs'
+              - '.github/workflows/pre-release.yml'
+              - '.github/workflows/test.yml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
             tauri:
               - 'crates/tauri-app/**'
               - 'crates/api-types/**'
@@ -158,6 +169,27 @@ jobs:
               - '.npmrc'
               - '.github/workflows/test.yml'
               - '.github/actions/**'
+
+  release-distribution-checks:
+    needs: changes
+    if: always() && (needs.changes.outputs.release-distribution == 'true' || needs.changes.result == 'skipped')
+    runs-on: *runner_label
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
+
+      - name: Install dependencies
+        run: |
+          pnpm install
+          cd npx-cli
+          npm ci
+
+      - name: Run release distribution checks
+        run: |
+          pnpm run check:npx-cli
+          pnpm run test:release-contract
 
   frontend-checks:
     needs: changes

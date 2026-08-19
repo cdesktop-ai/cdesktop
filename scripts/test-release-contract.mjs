@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -24,6 +25,30 @@ function sha256(data) {
   return crypto.createHash("sha256").update(data).digest("hex");
 }
 
+function effectiveArchForCli() {
+  if (os.platform() === "darwin" && os.arch() === "x64") {
+    try {
+      const translated = execFileSync(
+        "sysctl",
+        ["-in", "sysctl.proc_translated"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      ).trim();
+      if (translated === "1") return "arm64";
+    } catch {}
+  }
+  return /arm/i.test(os.arch()) ? "arm64" : "x64";
+}
+
+function platformDirForCli() {
+  const platformName =
+    os.platform() === "darwin"
+      ? "macos"
+      : os.platform() === "win32"
+        ? "windows"
+        : os.platform();
+  return `${platformName}-${effectiveArchForCli()}`;
+}
+
 function compileDownloader() {
   const outfile = path.join(tmp, "download.cjs");
   execFileSync(
@@ -31,6 +56,24 @@ function compileDownloader() {
     [
       "esbuild",
       "npx-cli/src/download.ts",
+      "--bundle",
+      "--platform=node",
+      "--target=node20",
+      "--format=cjs",
+      `--outfile=${outfile}`,
+    ],
+    { cwd: root, stdio: "pipe" },
+  );
+  return import(pathToFileURL(outfile));
+}
+
+function compileCli() {
+  const outfile = path.join(tmp, "cli.cjs");
+  execFileSync(
+    "npx",
+    [
+      "esbuild",
+      "npx-cli/src/cli.ts",
       "--bundle",
       "--platform=node",
       "--target=node20",
@@ -160,6 +203,63 @@ async function testDownloaderContract() {
   );
 }
 
+async function testLauncherValidatesCorruptCachedZip() {
+  const previousHome = process.env.HOME;
+  process.env.HOME = path.join(tmp, "home");
+  fs.mkdirSync(process.env.HOME, { recursive: true });
+
+  try {
+    const cli = await compileCli();
+    const requireFromNpxCli = createRequire(
+      path.join(root, "npx-cli", "package.json"),
+    );
+    const AdmZip = requireFromNpxCli("adm-zip");
+    const platformDir = platformDirForCli();
+    const cacheDir = path.join(
+      process.env.HOME,
+      ".cdesktop",
+      "bin",
+      "__BINARY_TAG__",
+      platformDir,
+    );
+    const corruptCachedZip = path.join(cacheDir, "cdesktop.zip");
+    const binaryName = os.platform() === "win32" ? "cdesktop.exe" : "cdesktop";
+    const binPath = path.join(cacheDir, binaryName);
+
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(corruptCachedZip, "not a zip");
+
+    const validZipPath = path.join(tmp, "validated-cdesktop.zip");
+    const zip = new AdmZip();
+    zip.addFile(binaryName, Buffer.from("#!/bin/sh\nexit 0\n"));
+    zip.writeZip(validZipPath);
+
+    let ensureBinaryWasCalled = false;
+    let launchedPath;
+    await cli.extractAndRun(
+      "cdesktop",
+      (pathFromLauncher) => {
+        launchedPath = pathFromLauncher;
+      },
+      async () => {
+        ensureBinaryWasCalled = true;
+        return validZipPath;
+      },
+    );
+
+    assert.equal(ensureBinaryWasCalled, true);
+    assert.equal(launchedPath, binPath);
+    assert.equal(fs.readFileSync(binPath, "utf8"), "#!/bin/sh\nexit 0\n");
+    assert.equal(fs.readFileSync(corruptCachedZip, "utf8"), "not a zip");
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+  }
+}
+
 function matrixNamesForJob(workflow, jobName, nextJobName) {
   const start = workflow.indexOf(`  ${jobName}:`);
   const end = workflow.indexOf(`  ${nextJobName}:`, start + 1);
@@ -190,6 +290,11 @@ function testWorkflowContract() {
   assert.match(workflow, /__BINARY_MANIFEST_SHA256__/);
   assert.match(workflow, /github-release-assets\.mjs/);
   assert.match(workflow, /needs: \[bump-version, package-npx-cli\]/);
+  const licenseCopyIndex = workflow.indexOf("\n          cp ../LICENSE LICENSE");
+  assert.notEqual(licenseCopyIndex, -1);
+  assert.ok(
+    licenseCopyIndex < workflow.indexOf("\n          npm pack", licenseCopyIndex),
+  );
 
   for (const platform of PLATFORMS) {
     for (const binary of BINARIES) {
@@ -217,6 +322,7 @@ function testWorkflowContract() {
 try {
   testReleaseAssetBuilder();
   await testDownloaderContract();
+  await testLauncherValidatesCorruptCachedZip();
   testWorkflowContract();
   console.log("release contract tests passed");
 } finally {

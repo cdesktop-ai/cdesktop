@@ -534,6 +534,7 @@ jobs:
               .replaceAll('__BINARY_TAG__', '${{ needs.bump-version.outputs.new_tag }}');
             fs.writeFileSync(path, bundled);
           "
+          cp ../LICENSE LICENSE
           npm pack
 
       - name: Add npm tarball to release assets
