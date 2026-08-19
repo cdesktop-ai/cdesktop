@@ -77,6 +77,29 @@ The layout is modeled after the Code tab of Anthropic's official desktop app: a 
 npx cdesktop
 ```
 
+## Release asset contract
+
+Each published CLI package is pinned to one GitHub release tag. Its bundled
+downloader fetches `manifest.json` from that exact release asset directory and
+then downloads flat binary assets named:
+
+```text
+cdesktop-PLATFORM.zip
+cdesktop-mcp-PLATFORM.zip
+cdesktop-review-PLATFORM.zip
+```
+
+Supported platforms are `linux-x64`, `linux-arm64`, `windows-x64`,
+`windows-arm64`, `macos-x64`, and `macos-arm64`.
+
+The prerelease also includes the npm tarball. `manifest.json` records SHA-256
+and byte size for every binary zip, and the CLI validates cached and fresh
+downloads against that manifest before extraction.
+
+For private mirrors, set `CDESKTOP_RELEASE_ASSET_BASE_URL` to the exact
+directory containing `manifest.json` and the flat asset files. The mirror must
+preserve the release asset names and manifest contents.
+
 ## Roadmap
 
 - **Desktop app build** — ship Tauri installers for macOS, Windows, and Linux
@@ -102,12 +125,14 @@ Please raise ideas and changes in [GitHub Discussions](https://github.com/cdeskt
 - [pnpm](https://pnpm.io/) (>=8)
 
 Additional development tools:
+
 ```bash
 cargo install cargo-watch
 cargo install sqlx-cli
 ```
 
 Install dependencies:
+
 ```bash
 pnpm i
 ```
@@ -138,18 +163,18 @@ pnpm run build
 
 The following environment variables can be configured at build time or runtime:
 
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `POSTHOG_API_KEY` | Build-time | Empty | PostHog analytics API key (disables analytics if empty) |
-| `POSTHOG_API_ENDPOINT` | Build-time | Empty | PostHog analytics endpoint (disables analytics if empty) |
-| `PORT` | Runtime | Auto-assign | **Production**: Server port. **Dev**: Frontend port (backend uses PORT+1) |
-| `BACKEND_PORT` | Runtime | `0` (auto-assign) | Backend server port (dev mode only, overrides PORT+1) |
-| `FRONTEND_PORT` | Runtime | `3000` | Frontend dev server port (dev mode only, overrides PORT) |
-| `HOST` | Runtime | `127.0.0.1` | Backend server host |
-| `MCP_HOST` | Runtime | Value of `HOST` | MCP server connection host (use `127.0.0.1` when `HOST=0.0.0.0` on Windows) |
-| `MCP_PORT` | Runtime | Value of `BACKEND_PORT` | MCP server connection port |
-| `DISABLE_WORKTREE_CLEANUP` | Runtime | Not set | Disable all git worktree cleanup including orphan and expired workspace cleanup (for debugging) |
-| `CDT_ALLOWED_ORIGINS` | Runtime | Not set | Comma-separated list of origins that are allowed to make backend API requests (e.g., `https://my-cdesktop.example.com`) |
+| Variable                   | Type       | Default                 | Description                                                                                                             |
+| -------------------------- | ---------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `POSTHOG_API_KEY`          | Build-time | Empty                   | PostHog analytics API key (disables analytics if empty)                                                                 |
+| `POSTHOG_API_ENDPOINT`     | Build-time | Empty                   | PostHog analytics endpoint (disables analytics if empty)                                                                |
+| `PORT`                     | Runtime    | Auto-assign             | **Production**: Server port. **Dev**: Frontend port (backend uses PORT+1)                                               |
+| `BACKEND_PORT`             | Runtime    | `0` (auto-assign)       | Backend server port (dev mode only, overrides PORT+1)                                                                   |
+| `FRONTEND_PORT`            | Runtime    | `3000`                  | Frontend dev server port (dev mode only, overrides PORT)                                                                |
+| `HOST`                     | Runtime    | `127.0.0.1`             | Backend server host                                                                                                     |
+| `MCP_HOST`                 | Runtime    | Value of `HOST`         | MCP server connection host (use `127.0.0.1` when `HOST=0.0.0.0` on Windows)                                             |
+| `MCP_PORT`                 | Runtime    | Value of `BACKEND_PORT` | MCP server connection port                                                                                              |
+| `DISABLE_WORKTREE_CLEANUP` | Runtime    | Not set                 | Disable all git worktree cleanup including orphan and expired workspace cleanup (for debugging)                         |
+| `CDT_ALLOWED_ORIGINS`      | Runtime    | Not set                 | Comma-separated list of origins that are allowed to make backend API requests (e.g., `https://my-cdesktop.example.com`) |
 
 **Build-time variables** must be set when running `pnpm run build`. **Runtime variables** are read when the application starts.
 

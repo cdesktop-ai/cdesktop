@@ -399,7 +399,6 @@ jobs:
           cargo sweep --maxsize 10GB
           cargo sweep --time 30
 
-
   package-npx-cli:
     needs: [bump-version, build-frontend, build-backend]
     runs-on: ubuntu-24.04
@@ -482,7 +481,7 @@ jobs:
           path: npx-cli/dist/
           retention-days: 1
 
-  upload-to-r2:
+  create-prerelease:
     needs: [bump-version, package-npx-cli]
     runs-on: ubuntu-24.04
     steps:
@@ -497,111 +496,17 @@ jobs:
           path: binaries/
           merge-multiple: true
 
-      - name: List downloaded binaries
-        run: |
-          echo "Downloaded binaries:"
-          find binaries/
-
-      - name: Configure AWS CLI for R2
-        run: |
-          aws configure set aws_access_key_id ${{ secrets.R2_BINARIES_ACCESS_KEY_ID }}
-          aws configure set aws_secret_access_key ${{ secrets.R2_BINARIES_SECRET_ACCESS_KEY }}
-          aws configure set default.region auto
-
-      - name: Generate manifest and upload to R2
-        run: |
-          TAG="${{ needs.bump-version.outputs.new_tag }}"
-          ENDPOINT="${{ secrets.R2_BINARIES_ENDPOINT }}"
-          BUCKET="${{ secrets.R2_BINARIES_BUCKET }}"
-
-          # Generate version manifest with checksums
-          node -e "
-            const fs = require('fs');
-            const crypto = require('crypto');
-            const manifest = { version: '$TAG', platforms: {} };
-            const platforms = ['linux-x64', 'linux-arm64', 'windows-x64', 'windows-arm64', 'macos-x64', 'macos-arm64'];
-            const binaries = ['cdesktop', 'cdesktop-mcp', 'cdesktop-review'];
-
-            for (const platform of platforms) {
-              manifest.platforms[platform] = {};
-              for (const binary of binaries) {
-                const zipPath = \`binaries/\${platform}/\${binary}.zip\`;
-                if (fs.existsSync(zipPath)) {
-                  const data = fs.readFileSync(zipPath);
-                  manifest.platforms[platform][binary] = {
-                    sha256: crypto.createHash('sha256').update(data).digest('hex'),
-                    size: data.length
-                  };
-                }
-              }
-            }
-            fs.writeFileSync('version-manifest.json', JSON.stringify(manifest, null, 2));
-            console.log('Generated manifest:');
-            console.log(JSON.stringify(manifest, null, 2));
-          "
-
-          # Upload binaries (use full tag for path, allows multiple pre-releases to coexist)
-          for platform in linux-x64 linux-arm64 windows-x64 windows-arm64 macos-x64 macos-arm64; do
-            for binary in cdesktop cdesktop-mcp cdesktop-review; do
-              if [ -f "binaries/$platform/$binary.zip" ]; then
-                echo "Uploading binaries/$platform/$binary.zip..."
-                aws s3 cp "binaries/$platform/$binary.zip" \
-                  "s3://$BUCKET/binaries/$TAG/$platform/$binary.zip" \
-                  --endpoint-url "$ENDPOINT"
-              fi
-            done
-          done
-
-          # Upload version manifest
-          echo "Uploading version manifest..."
-          aws s3 cp version-manifest.json \
-            "s3://$BUCKET/binaries/$TAG/manifest.json" \
-            --endpoint-url "$ENDPOINT" --content-type "application/json"
-
-          # Update global manifest
-          VERSION="${{ needs.bump-version.outputs.new_version }}"
-          echo "Updating global manifest..."
-          echo "{\"latest\": \"$VERSION\"}" | aws s3 cp - \
-            "s3://$BUCKET/binaries/manifest.json" \
-            --endpoint-url "$ENDPOINT" --content-type "application/json"
-
-      - name: Verify upload
-        run: |
-          TAG="${{ needs.bump-version.outputs.new_tag }}"
-          ENDPOINT="${{ secrets.R2_BINARIES_ENDPOINT }}"
-          BUCKET="${{ secrets.R2_BINARIES_BUCKET }}"
-
-          echo "Listing uploaded files..."
-          aws s3 ls "s3://$BUCKET/binaries/$TAG/" \
-            --endpoint-url "$ENDPOINT" \
-            --recursive
-
-  create-prerelease:
-    needs: [bump-version, build-frontend, upload-to-r2]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.bump-version.outputs.new_tag }}
-
-      - name: Download frontend artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: frontend-dist
-          path: packages/local-web/dist/
-
-
-
       - name: List downloaded artifacts
         run: |
-          echo "Web dist:"
-          find packages/local-web/dist
+          echo "Downloaded binary packages:"
+          find binaries/
 
-      - name: Zip frontend
+      - name: Prepare GitHub release binary assets
         run: |
-          mkdir cdesktop-${{ needs.bump-version.outputs.new_tag }}
-          mv packages/local-web/dist cdesktop-${{ needs.bump-version.outputs.new_tag }}
-          zip -r cdesktop-${{ needs.bump-version.outputs.new_tag }}.zip cdesktop-${{ needs.bump-version.outputs.new_tag }}
+          node scripts/github-release-assets.mjs \
+            --tag "${{ needs.bump-version.outputs.new_tag }}" \
+            --source binaries \
+            --out release-assets
 
       - name: Setup Node for npm pack
         uses: ./.github/actions/setup-node
@@ -615,10 +520,42 @@ jobs:
         run: |
           cd npx-cli
           npm run build
-          # Replace placeholders in the bundled output
-          sed -i "s|__R2_PUBLIC_URL__|${{ secrets.R2_BINARIES_PUBLIC_URL }}|g" bin/cli.js
-          sed -i "s|__BINARY_TAG__|${{ needs.bump-version.outputs.new_tag }}|g" bin/cli.js
+          node -e "
+            const fs = require('fs');
+            const path = 'bin/cli.js';
+            const releaseBase = 'https://github.com/${{ github.repository }}/releases/download/${{ needs.bump-version.outputs.new_tag }}';
+            let bundled = fs.readFileSync(path, 'utf8');
+            bundled = bundled
+              .replaceAll('__GITHUB_RELEASE_ASSET_BASE_URL__', releaseBase)
+              .replaceAll('__BINARY_TAG__', '${{ needs.bump-version.outputs.new_tag }}');
+            fs.writeFileSync(path, bundled);
+          "
           npm pack
+
+      - name: Add npm tarball to release assets and manifest
+        run: |
+          cp npx-cli/cdesktop-*.tgz release-assets/
+          node -e "
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const manifestPath = 'release-assets/manifest.json';
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const packageFile = fs.readdirSync('release-assets').find((name) => /^cdesktop-.*\\.tgz$/.test(name));
+            if (!packageFile) throw new Error('Missing npm package tarball');
+            const data = fs.readFileSync(\`release-assets/\${packageFile}\`);
+            manifest.assets[packageFile] = {
+              sha256: crypto.createHash('sha256').update(data).digest('hex'),
+              size: data.length
+            };
+            fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+          "
+
+      - name: Verify release asset layout
+        run: |
+          find release-assets -maxdepth 1 -type f | sort
+          test "$(find release-assets -maxdepth 1 -type f -name '*.zip' | wc -l)" -eq 18
+          test -f release-assets/manifest.json
+          test "$(find release-assets -maxdepth 1 -type f -name 'cdesktop-*.tgz' | wc -l)" -eq 1
 
       - name: Create GitHub Pre-Release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
@@ -628,5 +565,4 @@ jobs:
           prerelease: true
           generate_release_notes: true
           files: |
-            cdesktop-${{ needs.bump-version.outputs.new_tag }}.zip
-            npx-cli/cdesktop-*.tgz
+            release-assets/*
