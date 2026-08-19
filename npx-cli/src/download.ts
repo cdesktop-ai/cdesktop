@@ -5,10 +5,11 @@ import crypto from "crypto";
 import os from "os";
 
 export const BINARY_TAG = "__BINARY_TAG__"; // e.g., v0.0.135-20251215122030
+export const BINARY_MANIFEST_SHA256 = "__BINARY_MANIFEST_SHA256__";
 
 // Replaced during npm pack by the prerelease workflow with the exact GitHub
 // release asset directory for BINARY_TAG. Runtime override must also be the
-// exact directory containing manifest.json and the flat binary zip assets.
+// exact directory containing the same manifest.json and flat binary zip assets.
 const DEFAULT_RELEASE_ASSET_BASE_URL = "__GITHUB_RELEASE_ASSET_BASE_URL__";
 export const RELEASE_ASSET_BASE_URL = normalizeReleaseAssetBaseUrl(
   process.env.CDESKTOP_RELEASE_ASSET_BASE_URL || DEFAULT_RELEASE_ASSET_BASE_URL,
@@ -29,7 +30,6 @@ export interface BinaryInfo {
 export interface BinaryManifest {
   version: string;
   assets: Record<string, BinaryInfo>;
-  platforms: Record<string, Record<string, BinaryInfo>>;
 }
 
 export interface DesktopPlatformInfo {
@@ -68,17 +68,15 @@ export function binaryInfoForAsset(
   binaryName: string,
 ): BinaryInfo | undefined {
   const assetName = releaseAssetName(binaryName, platform);
-  return (
-    manifest.assets?.[assetName] ?? manifest.platforms?.[platform]?.[binaryName]
-  );
+  return manifest.assets?.[assetName];
 }
 
-function fetchJson<T>(url: string): Promise<T> {
+function fetchText(url: string): Promise<string> {
   return new Promise((resolve, reject) => {
     https
       .get(url, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
-          return fetchJson<T>(res.headers.location!)
+          return fetchText(res.headers.location!)
             .then(resolve)
             .catch(reject);
         }
@@ -87,16 +85,48 @@ function fetchJson<T>(url: string): Promise<T> {
         }
         let data = "";
         res.on("data", (chunk: string) => (data += chunk));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(data) as T);
-          } catch {
-            reject(new Error(`Failed to parse JSON from ${url}`));
-          }
-        });
+        res.on("end", () => resolve(data));
       })
       .on("error", reject);
   });
+}
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const data = await fetchText(url);
+  try {
+    return JSON.parse(data) as T;
+  } catch {
+    throw new Error(`Failed to parse JSON from ${url}`);
+  }
+}
+
+export function validateBinaryManifestPayload(
+  data: string,
+  expectedSha256 = BINARY_MANIFEST_SHA256,
+): BinaryManifest {
+  if (expectedSha256.startsWith("__")) {
+    throw new Error("Binary manifest checksum was not injected");
+  }
+
+  const actualSha256 = crypto.createHash("sha256").update(data).digest("hex");
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(
+      `Manifest checksum mismatch: expected ${expectedSha256}, got ${actualSha256}`,
+    );
+  }
+
+  try {
+    return JSON.parse(data) as BinaryManifest;
+  } catch {
+    throw new Error("Failed to parse verified binary manifest");
+  }
+}
+
+async function fetchVerifiedBinaryManifest(): Promise<BinaryManifest> {
+  const data = await fetchText(
+    releaseAssetUrl(RELEASE_ASSET_BASE_URL, "manifest.json"),
+  );
+  return validateBinaryManifestPayload(data);
 }
 
 export function validateDownloadedFile(
@@ -230,9 +260,7 @@ export async function ensureBinary(
 
   fs.mkdirSync(cacheDir, { recursive: true });
 
-  const manifest = await fetchJson<BinaryManifest>(
-    releaseAssetUrl(RELEASE_ASSET_BASE_URL, "manifest.json"),
-  );
+  const manifest = await fetchVerifiedBinaryManifest();
   const binaryInfo = binaryInfoForAsset(manifest, platform, binaryName);
 
   if (!binaryInfo) {

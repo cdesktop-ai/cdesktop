@@ -516,39 +516,29 @@ jobs:
           cd npx-cli
           npm ci
 
-      - name: Build npx-cli TypeScript, inject secrets, and Pack
+      - name: Build npx-cli TypeScript, inject release contract, and Pack
         run: |
           cd npx-cli
           npm run build
           node -e "
             const fs = require('fs');
+            const crypto = require('crypto');
             const path = 'bin/cli.js';
             const releaseBase = 'https://github.com/${{ github.repository }}/releases/download/${{ needs.bump-version.outputs.new_tag }}';
+            const manifest = fs.readFileSync('../release-assets/manifest.json');
+            const manifestSha256 = crypto.createHash('sha256').update(manifest).digest('hex');
             let bundled = fs.readFileSync(path, 'utf8');
             bundled = bundled
               .replaceAll('__GITHUB_RELEASE_ASSET_BASE_URL__', releaseBase)
+              .replaceAll('__BINARY_MANIFEST_SHA256__', manifestSha256)
               .replaceAll('__BINARY_TAG__', '${{ needs.bump-version.outputs.new_tag }}');
             fs.writeFileSync(path, bundled);
           "
           npm pack
 
-      - name: Add npm tarball to release assets and manifest
+      - name: Add npm tarball to release assets
         run: |
           cp npx-cli/cdesktop-*.tgz release-assets/
-          node -e "
-            const fs = require('fs');
-            const crypto = require('crypto');
-            const manifestPath = 'release-assets/manifest.json';
-            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-            const packageFile = fs.readdirSync('release-assets').find((name) => /^cdesktop-.*\\.tgz$/.test(name));
-            if (!packageFile) throw new Error('Missing npm package tarball');
-            const data = fs.readFileSync(\`release-assets/\${packageFile}\`);
-            manifest.assets[packageFile] = {
-              sha256: crypto.createHash('sha256').update(data).digest('hex'),
-              size: data.length
-            };
-            fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
-          "
 
       - name: Verify release asset layout
         run: |

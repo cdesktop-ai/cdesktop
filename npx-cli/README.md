@@ -79,9 +79,10 @@ npx cdesktop
 
 ## Release asset contract
 
-Each published CLI package is pinned to one GitHub release tag. Its bundled
-downloader fetches `manifest.json` from that exact release asset directory and
-then downloads flat binary assets named:
+Each published CLI package is pinned to one GitHub release tag and one binary
+manifest SHA-256. Its bundled downloader fetches `manifest.json` from that
+exact release asset directory, verifies the manifest bytes first, and then
+downloads flat binary assets named:
 
 ```text
 cdesktop-PLATFORM.zip
@@ -92,13 +93,17 @@ cdesktop-review-PLATFORM.zip
 Supported platforms are `linux-x64`, `linux-arm64`, `windows-x64`,
 `windows-arm64`, `macos-x64`, and `macos-arm64`.
 
-The prerelease also includes the npm tarball. `manifest.json` records SHA-256
-and byte size for every binary zip, and the CLI validates cached and fresh
-downloads against that manifest before extraction.
+The prerelease also includes the npm tarball as a sibling release asset.
+`manifest.json` records SHA-256 and byte size for every binary zip only, and
+the CLI validates cached and fresh downloads against the verified manifest
+before extraction. The npm tarball checksum is intentionally outside the binary
+manifest so downstream release locks can pin the package URL and digest without
+creating a hash cycle.
 
 For private mirrors, set `CDESKTOP_RELEASE_ASSET_BASE_URL` to the exact
 directory containing `manifest.json` and the flat asset files. The mirror must
-preserve the release asset names and manifest contents.
+preserve the release asset names and the exact manifest bytes embedded into the
+published package.
 
 ## Roadmap
 

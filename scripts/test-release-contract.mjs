@@ -12,6 +12,7 @@ import {
   PLATFORMS,
   buildReleaseAssets,
   releaseAssetName,
+  releaseAssetNames,
 } from "./github-release-assets.mjs";
 
 const root = process.cwd();
@@ -66,6 +67,11 @@ function testReleaseAssetBuilder() {
   });
 
   assert.equal(Object.keys(manifest.assets).length, 18);
+  assert.deepEqual(Object.keys(manifest).sort(), ["assets", "version"]);
+  assert.deepEqual(
+    Object.keys(manifest.assets).sort(),
+    releaseAssetNames().sort(),
+  );
   assert.equal(
     releaseAssetName("cdesktop-mcp", "linux-arm64"),
     "cdesktop-mcp-linux-arm64.zip",
@@ -80,10 +86,6 @@ function testReleaseAssetBuilder() {
         sha256: sha256(data),
         size: data.length,
       });
-      assert.deepEqual(
-        manifest.platforms[platform][binary],
-        manifest.assets[assetName],
-      );
     }
   }
 
@@ -132,16 +134,47 @@ async function testDownloaderContract() {
     assets: {
       "cdesktop-linux-x64.zip": info,
     },
-    platforms: {
-      "linux-x64": {
-        cdesktop: info,
-      },
-    },
   };
   assert.deepEqual(
     download.binaryInfoForAsset(manifest, "linux-x64", "cdesktop"),
     info,
   );
+  assert.equal(
+    download.binaryInfoForAsset(manifest, "linux-x64", "cdesktop-mcp"),
+    undefined,
+  );
+
+  const manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
+  const manifestSha = sha256(manifestJson);
+  assert.deepEqual(
+    download.validateBinaryManifestPayload(manifestJson, manifestSha),
+    manifest,
+  );
+  assert.throws(
+    () => download.validateBinaryManifestPayload(manifestJson, "0".repeat(64)),
+    /Manifest checksum mismatch/,
+  );
+  assert.throws(
+    () => download.validateBinaryManifestPayload(manifestJson),
+    /checksum was not injected/,
+  );
+}
+
+function matrixNamesForJob(workflow, jobName, nextJobName) {
+  const start = workflow.indexOf(`  ${jobName}:`);
+  const end = workflow.indexOf(`  ${nextJobName}:`, start + 1);
+  assert.notEqual(start, -1, `Missing workflow job ${jobName}`);
+  assert.notEqual(end, -1, `Missing workflow job ${nextJobName}`);
+  const job = workflow.slice(start, end);
+  return job
+    .split(/\n\s+- target: /)
+    .slice(1)
+    .map((entry) => {
+      const match = entry.match(/\n\s+name: ([a-z0-9-]+)/);
+      assert.ok(match, `Missing matrix name in ${jobName}`);
+      return match[1];
+    })
+    .sort();
 }
 
 function testWorkflowContract() {
@@ -154,6 +187,7 @@ function testWorkflowContract() {
   assert.doesNotMatch(workflow, /R2_BINARIES_/);
   assert.match(workflow, /release-assets\/\*/);
   assert.match(workflow, /__GITHUB_RELEASE_ASSET_BASE_URL__/);
+  assert.match(workflow, /__BINARY_MANIFEST_SHA256__/);
   assert.match(workflow, /github-release-assets\.mjs/);
   assert.match(workflow, /needs: \[bump-version, package-npx-cli\]/);
 
@@ -165,6 +199,19 @@ function testWorkflowContract() {
       );
     }
   }
+
+  assert.deepEqual(
+    matrixNamesForJob(workflow, "build-backend", "package-npx-cli"),
+    [...PLATFORMS].sort(),
+  );
+  assert.deepEqual(
+    matrixNamesForJob(workflow, "package-npx-cli", "create-prerelease"),
+    [...PLATFORMS].sort(),
+  );
+  assert.match(
+    workflow,
+    /test "\$\(find release-assets -maxdepth 1 -type f -name '\*\.zip' \| wc -l\)" -eq 18/,
+  );
 }
 
 try {

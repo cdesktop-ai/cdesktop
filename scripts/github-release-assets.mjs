@@ -19,6 +19,12 @@ export function releaseAssetName(binary, platform) {
   return `${binary}-${platform}.zip`;
 }
 
+export function releaseAssetNames() {
+  return PLATFORMS.flatMap((platform) =>
+    BINARIES.map((binary) => releaseAssetName(binary, platform)),
+  );
+}
+
 function usage() {
   return [
     "Usage:",
@@ -59,12 +65,9 @@ export function buildReleaseAssets({ tag, sourceDir, outDir }) {
   const manifest = {
     version: tag,
     assets: {},
-    platforms: {},
   };
 
   for (const platform of PLATFORMS) {
-    manifest.platforms[platform] = {};
-
     for (const binary of BINARIES) {
       const sourcePath = path.join(sourceDir, platform, `${binary}.zip`);
       if (!fs.existsSync(sourcePath)) {
@@ -80,7 +83,6 @@ export function buildReleaseAssets({ tag, sourceDir, outDir }) {
         size: fs.statSync(outPath).size,
       };
       manifest.assets[assetName] = info;
-      manifest.platforms[platform][binary] = info;
     }
   }
 
