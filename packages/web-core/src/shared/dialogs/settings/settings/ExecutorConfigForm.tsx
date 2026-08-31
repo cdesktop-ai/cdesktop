@@ -37,6 +37,10 @@ const HIDDEN_FIELDS_BY_EXECUTOR: Partial<Record<BaseCodingAgent, string[]>> = {
   ],
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export function ExecutorConfigForm({
   executor,
   value,
@@ -59,11 +63,12 @@ export function ExecutorConfigForm({
     const hidden = HIDDEN_FIELDS_BY_EXECUTOR[executor];
     if (!hidden || hidden.length === 0) return base;
     const next = { ...base };
-    if (next.properties) {
-      next.properties = { ...next.properties };
+    if (isRecord(next.properties)) {
+      const properties = { ...next.properties };
       for (const key of hidden) {
-        delete next.properties[key];
+        delete properties[key];
       }
+      next.properties = properties;
     }
     return next;
   }, [executor]);
@@ -87,9 +92,7 @@ export function ExecutorConfigForm({
     const ui: Record<string, Record<string, unknown>> = {
       env: { 'ui:field': 'KeyValueField' },
     };
-    const props = (
-      schema as { properties?: Record<string, unknown> } | undefined
-    )?.properties;
+    const props = isRecord(schema?.properties) ? schema.properties : undefined;
     if (props) {
       for (const fieldName of Object.keys(props)) {
         const titleKey = `settings.agents.fields.${fieldName}.title`;

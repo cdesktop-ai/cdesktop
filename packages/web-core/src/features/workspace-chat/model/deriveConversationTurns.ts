@@ -1,6 +1,7 @@
 import {
   type CommandExitStatus,
   type ExecutorAction,
+  type PromptKind,
   type TokenUsageInfo,
   type ToolStatus,
 } from 'shared/types';
@@ -24,6 +25,7 @@ export interface ConversationAgentTurn {
     | 'agent_failed';
   readonly process: ConversationSemanticProcessItem;
   readonly prompt: string | null;
+  readonly promptKind: PromptKind;
   readonly shouldEmitUserMessage: boolean;
   readonly visibleEntries: ConversationSemanticProcessItem['visibleEntries'];
   readonly latestTokenUsageInfo: TokenUsageInfo | null;
@@ -40,6 +42,7 @@ export interface ConversationScriptTurnProcess {
   readonly toolStatus: ToolStatus;
   readonly shouldEmitInitialPromptAfterSetup: boolean;
   readonly initialPromptAfterSetup: string | null;
+  readonly initialPromptKindAfterSetup: PromptKind;
 }
 
 export interface ConversationScriptTurn {
@@ -68,18 +71,27 @@ function isAgentTurn(turn: ConversationTurn): turn is ConversationAgentTurn {
   );
 }
 
+interface ChainPrompt {
+  readonly prompt: string;
+  /** Provenance the backend recorded on the action. Only initial requests can
+   *  carry anything other than a plain user prompt. */
+  readonly kind: PromptKind;
+}
+
 function getPromptFromActionChain(
   action: ExecutorAction | null
-): string | null {
+): ChainPrompt | null {
   let current = action;
   while (current) {
     const typ = current.typ;
+    if (typ.type === 'CodingAgentInitialRequest') {
+      return { prompt: typ.prompt, kind: typ.prompt_kind };
+    }
     if (
-      typ.type === 'CodingAgentInitialRequest' ||
       typ.type === 'CodingAgentFollowUpRequest' ||
       typ.type === 'ReviewRequest'
     ) {
-      return typ.prompt;
+      return { prompt: typ.prompt, kind: 'user' };
     }
     current = current.next_action;
   }
@@ -118,9 +130,11 @@ function deriveAgentTurn(
   isLastTurn: boolean
 ): ConversationAgentTurn {
   const executorActionType = process.executionProcess.executor_action.typ;
-  const prompt = getPromptFromActionChain(
+  const chainPrompt = getPromptFromActionChain(
     process.executionProcess.executor_action
   );
+  const prompt = chainPrompt?.prompt ?? null;
+  const promptKind: PromptKind = chainPrompt?.kind ?? 'user';
   const setupHelpText = process.failedOrKilled
     ? getSetupRequiredHelp(process)
     : undefined;
@@ -136,6 +150,7 @@ function deriveAgentTurn(
       kind: 'agent_pending_approval',
       process,
       prompt,
+      promptKind,
       shouldEmitUserMessage,
       visibleEntries: process.visibleEntries,
       latestTokenUsageInfo: getLatestTokenUsageInfo(process),
@@ -152,6 +167,7 @@ function deriveAgentTurn(
       kind: 'agent_running',
       process,
       prompt,
+      promptKind,
       shouldEmitUserMessage,
       visibleEntries: process.visibleEntries,
       latestTokenUsageInfo: getLatestTokenUsageInfo(process),
@@ -167,6 +183,7 @@ function deriveAgentTurn(
       kind: 'agent_failed',
       process,
       prompt,
+      promptKind,
       shouldEmitUserMessage,
       visibleEntries: process.visibleEntries,
       latestTokenUsageInfo: getLatestTokenUsageInfo(process),
@@ -182,6 +199,7 @@ function deriveAgentTurn(
     kind: 'agent_idle',
     process,
     prompt,
+    promptKind,
     shouldEmitUserMessage,
     visibleEntries: process.visibleEntries,
     latestTokenUsageInfo: getLatestTokenUsageInfo(process),
@@ -245,15 +263,18 @@ function deriveScriptTurnProcess(
   const shouldEmitInitialPromptAfterSetup =
     kind === 'setup_script' && isFirstTurn && !process.isRunning;
 
+  const chainPrompt = shouldEmitInitialPromptAfterSetup
+    ? getPromptFromActionChain(process.executionProcess.executor_action)
+    : null;
+
   return {
     process,
     toolName: toScriptToolName(kind),
     exitStatus,
     toolStatus,
     shouldEmitInitialPromptAfterSetup,
-    initialPromptAfterSetup: shouldEmitInitialPromptAfterSetup
-      ? getPromptFromActionChain(process.executionProcess.executor_action)
-      : null,
+    initialPromptAfterSetup: chainPrompt?.prompt ?? null,
+    initialPromptKindAfterSetup: chainPrompt?.kind ?? 'user',
   };
 }
 

@@ -1,6 +1,7 @@
 use db::models::{
     execution_process::{ExecutionProcess, ExecutionProcessStatus},
     session::Session,
+    session_command::SessionCommand,
 };
 use rmcp::{
     ErrorData, handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool,
@@ -99,8 +100,9 @@ struct ExecutorConfigPayload {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 struct RunCodingAgentInSessionResponse {
     session_id: String,
-    execution_id: String,
-    execution: serde_json::Value,
+    command_id: String,
+    execution_id: Option<String>,
+    command: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -298,22 +300,27 @@ impl McpServer {
         };
 
         let url = self.url(&format!("/api/sessions/{session_id}/follow-up"));
-        let execution_process: ExecutionProcess =
+        let command: SessionCommand =
             match self.send_json(self.client.post(&url).json(&payload)).await {
                 Ok(value) => value,
                 Err(error_result) => return Ok(Self::tool_error(error_result)),
             };
 
-        let execution_id = execution_process.id.to_string();
-        let execution = match Self::serialize_execution_process(&execution_process) {
+        let command_value = match serde_json::to_value(&command) {
             Ok(value) => value,
-            Err(error_result) => return Ok(Self::tool_error(error_result)),
+            Err(error) => {
+                return Self::err(
+                    "Failed to serialize session command response".to_string(),
+                    Some(error.to_string()),
+                );
+            }
         };
 
         Self::success(&RunCodingAgentInSessionResponse {
             session_id: session_id.to_string(),
-            execution_id,
-            execution,
+            command_id: command.id.to_string(),
+            execution_id: command.execution_process_id.map(|id| id.to_string()),
+            command: command_value,
         })
     }
 

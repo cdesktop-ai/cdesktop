@@ -6,9 +6,10 @@
  * Caller session is identified by `CDESKTOP_SESSION_ID`, injected by the
  * server at executor spawn (see `crates/local-deployment/src/container.rs`).
  *
- * Implements three subcommands per the MVP plan:
+ * Implements four subcommands per the MVP plan:
  *   spawn   — lead-only; create a teammate session
  *   send    — message a peer in the same workspace
+ *   manager: message the lead session without looking up its id
  *   list    — show team roster (id, name, executor, created_at)
  *
  * `transcript` was descoped — see `plans/agent-teams-mvp.md` v1.5
@@ -229,10 +230,55 @@ interface SendFlags {
   json?: boolean;
 }
 
+interface ListedExecutionProcess {
+  id: string;
+  status: string;
+  run_reason: string;
+}
+
+interface PendingApproval {
+  execution_process_id: string;
+}
+
+async function interruptTarget(target: string): Promise<string[]> {
+  const path = `/execution-processes?session_id=${encodeURIComponent(target)}`;
+  let processes = await apiGet<ListedExecutionProcess[]>(path);
+  const running = processes.filter(
+    (process) => process.status === "running" && process.run_reason !== "devserver",
+  );
+  const pending = await apiGet<PendingApproval[]>("/approvals");
+  const targetProcessIds = new Set(processes.map((process) => process.id));
+  if (pending.some((approval) => targetProcessIds.has(approval.execution_process_id))) {
+    fatal(
+      `target session ${target} has a pending approval or question; resolve it before steering`,
+    );
+  }
+  for (const process of running) {
+    await apiPost(`/execution-processes/${encodeURIComponent(process.id)}/stop`, {});
+  }
+  if (running.length === 0) return [];
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    processes = await apiGet<ListedExecutionProcess[]>(path);
+    if (
+      !processes.some(
+        (process) => process.status === "running" && process.run_reason !== "devserver",
+      )
+    ) {
+      return running.map((process) => process.id);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  fatal(`target session ${target} did not stop within 30 seconds`);
+}
+
 async function cmdSend(target: string | undefined, flags: SendFlags): Promise<void> {
   if (!target) fatal("usage: cdesktop team send <session-id> --message-file <path>");
   const prompt = readMessageArg(flags.message, flags.messageFile);
   const caller = callerSessionId();
+  if (target === caller) fatal("a session cannot steer itself");
+  const interrupted = await interruptTarget(target);
   // Omit executor_config + selected_provider_id so the server inherits the
   // recipient's last config (see `latest_executor_config_for_session`).
   const body = { prompt };
@@ -245,10 +291,25 @@ async function cmdSend(target: string | undefined, flags: SendFlags): Promise<vo
     { "x-cdesktop-from-session": caller },
   );
   if (flags.json) {
-    process.stdout.write(`${JSON.stringify(data)}\n`);
+    process.stdout.write(`${JSON.stringify({ data, interrupted })}\n`);
   } else {
-    process.stdout.write(`sent to ${target}\n`);
+    const detail = interrupted.length > 0 ? ` after interrupting ${interrupted.length} turn(s)` : "";
+    process.stdout.write(`steered ${target}${detail}\n`);
   }
+}
+
+async function cmdManager(flags: SendFlags): Promise<void> {
+  const caller = callerSessionId();
+  const me = await apiGet<ListedSession>(`/sessions/${encodeURIComponent(caller)}`);
+  const peers = await apiGet<ListedSession[]>(
+    `/sessions?workspace_id=${encodeURIComponent(me.workspace_id)}`,
+  );
+  const manager = [...peers].sort((a, b) => a.created_at.localeCompare(b.created_at))[0];
+  if (!manager) fatal("current workspace has no lead session");
+  if (manager.id === caller) {
+    fatal("current session is already the workspace lead; there is no parent manager to contact");
+  }
+  return cmdSend(manager.id, flags);
 }
 
 interface ListFlags {
@@ -310,8 +371,13 @@ function printTeamHelp(): void {
       "      --provider.",
       "",
       "  cdesktop team send <session-id> --message <text> | --message-file <path> [--json]",
-      "      Send a follow-up message to a peer. Does NOT swap the recipient's",
+      "      Interrupt only that peer's running turn, then send an immediate follow-up.",
+      "      Does NOT swap the recipient's",
       "      model or provider — they keep their own config.",
+      "",
+      "  cdesktop team manager --message <text> | --message-file <path> [--json]",
+      "      Immediately steer the workspace lead with a question, blocker,",
+      "      status update, or completion notice without looking up its id.",
       "",
       "  cdesktop team list [--json]",
       "      List the current workspace's team roster. Oldest session = lead.",
@@ -347,6 +413,8 @@ export async function runTeam(args: string[]): Promise<void> {
       const positional = flags._.shift();
       return cmdSend(positional, flags);
     }
+    case "manager":
+      return cmdManager(flags);
     case "list":
       return cmdList(flags);
     default:

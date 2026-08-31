@@ -52,7 +52,6 @@ use codex_app_server_protocol::{
     AskForApproval as V2AskForApproval, ReviewTarget, SandboxMode as V2SandboxMode,
     ThreadForkParams, ThreadStartParams, UserInput,
 };
-use codex_protocol::config_types::ServiceTier;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -78,9 +77,39 @@ use crate::{
     },
     logs::utils::patch,
     model_selector::{ModelInfo, ModelSelectorConfig, PermissionPolicy, ReasoningOption},
+    outcome::{ExecutionOutcomeClass, NormalizedExecutionOutcome},
     profile::ExecutorConfig,
+    provider::{ProviderContext, ProviderInjection, ProviderInjectionError},
     stdout_dup::create_stdout_pipe_writer,
 };
+
+/// Hardcoded `model_providers.<id>` slug for the cdesktop-injected provider.
+/// Fixing it keeps the emitted keys identical for every record, so the applier
+/// never has to derive them from user-supplied naming.
+const INJECTED_PROVIDER_ID: &str = "cdt";
+
+/// Env var carrying the user's API key into Codex's `env_key`-driven auth
+/// path, wired once as `model_providers.cdt.env_key`.
+const INJECTED_API_KEY_ENV: &str = "CDT_API_KEY";
+
+/// Codex spawn injection beyond plain env vars.
+///
+/// Codex's `app-server` JSON-RPC subcommand accepts arbitrary
+/// `model_providers.<id>.<key>` overrides via `ThreadStartParams.config`
+/// (a free-form map the server feeds to the same dotted-path applier the
+/// `-c key=value` CLI flag uses; see
+/// `related/codex/.../apply_single_override`). The `model_provider` field on
+/// `ThreadStartParams` is a separate typesafe knob picking which
+/// `model_providers.<id>` block to use.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodexProviderInjection {
+    /// Dotted-path keys merged into `ThreadStartParams.config`:
+    /// `model_providers.cdt.{name,base_url,env_key,wire_api}`.
+    #[serde(default)]
+    pub config_overrides: HashMap<String, serde_json::Value>,
+    /// Value for `ThreadStartParams.model_provider`.
+    pub model_provider_id: String,
+}
 
 /// Sandbox policy modes for Codex
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema, AsRefStr)]
@@ -97,8 +126,6 @@ pub enum SandboxMode {
 ///
 /// - `UnlessTrusted`: Read-only commands are auto-approved. Everything else will
 ///   ask the user to approve.
-/// - `OnFailure`: All commands run in a restricted sandbox initially. If a
-///   command fails, the user is asked to approve execution without the sandbox.
 /// - `OnRequest`: The model decides when to ask the user for approval.
 /// - `Never`: Commands never ask for approval. Commands that fail in the
 ///   restricted sandbox are not retried.
@@ -107,7 +134,6 @@ pub enum SandboxMode {
 #[strum(serialize_all = "kebab-case")]
 pub enum AskForApproval {
     UnlessTrusted,
-    OnFailure,
     OnRequest,
     Never,
 }
@@ -121,6 +147,7 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 /// Model reasoning summary style
@@ -233,6 +260,61 @@ impl StandardCodingAgentExecutor for Codex {
         self.approvals = Some(approvals);
     }
 
+    fn brokers_approvals(&self) -> bool {
+        true
+    }
+
+    fn provider_slot(&self) -> &'static str {
+        "codex"
+    }
+
+    /// Emit the `model_providers.cdt.*` overrides plus the `CDT_API_KEY` env
+    /// var they name.
+    ///
+    /// `requires_openai_auth` is left at its default (false), so codex's auth
+    /// path reads only `env_key` and never consults `~/.codex/auth.json` for
+    /// our provider — the user's home dir stays read-only from cdesktop.
+    /// The slot's own `env` is overlaid first so a vendor-quirk entry cannot
+    /// silently clobber the credential we set last.
+    fn build_provider_injection(
+        &self,
+        ctx: &ProviderContext,
+    ) -> Result<ProviderInjection, ProviderInjectionError> {
+        let api_key = ctx.require_api_key(BaseCodingAgent::Codex)?;
+        let base_url = ctx.require_base_url(BaseCodingAgent::Codex)?;
+
+        let mut env = ctx.payload.env.clone();
+        env.insert(INJECTED_API_KEY_ENV.to_string(), api_key.to_string());
+
+        let prefix = format!("model_providers.{INJECTED_PROVIDER_ID}");
+        let config_overrides = HashMap::from([
+            (
+                format!("{prefix}.name"),
+                Value::String(ctx.record_name.clone()),
+            ),
+            (
+                format!("{prefix}.base_url"),
+                Value::String(base_url.to_string()),
+            ),
+            (
+                format!("{prefix}.env_key"),
+                Value::String(INJECTED_API_KEY_ENV.to_string()),
+            ),
+            (
+                format!("{prefix}.wire_api"),
+                Value::String("responses".to_string()),
+            ),
+        ]);
+
+        Ok(ProviderInjection::from_env(env).with_structured(
+            BaseCodingAgent::Codex,
+            CodexProviderInjection {
+                config_overrides,
+                model_provider_id: INJECTED_PROVIDER_ID.to_string(),
+            },
+        ))
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,
@@ -323,12 +405,13 @@ impl StandardCodingAgentExecutor for Codex {
         _workdir: Option<&std::path::Path>,
         _repo_path: Option<&std::path::Path>,
     ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
-        let xhigh_reasoning_options = ReasoningOption::from_names(
+        let reasoning_options = ReasoningOption::from_names(
             [
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
                 ReasoningEffort::High,
                 ReasoningEffort::Xhigh,
+                ReasoningEffort::Max,
             ]
             .map(|e| e.as_ref().to_string()),
         );
@@ -337,28 +420,28 @@ impl StandardCodingAgentExecutor for Codex {
             model_selector: ModelSelectorConfig {
                 models: vec![
                     ModelInfo {
-                        id: "gpt-5.5".to_string(),
-                        name: "GPT-5.5".to_string(),
+                        id: "gpt-5.6-sol".to_string(),
+                        name: "GPT-5.6 Sol".to_string(),
                         provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
+                        reasoning_options: reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.4".to_string(),
-                        name: "GPT-5.4".to_string(),
+                        id: "gpt-5.6".to_string(),
+                        name: "GPT-5.6 (latest)".to_string(),
                         provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
+                        reasoning_options: reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.4-mini".to_string(),
-                        name: "GPT-5.4 Mini".to_string(),
+                        id: "gpt-5.6-terra".to_string(),
+                        name: "GPT-5.6 Terra".to_string(),
                         provider_id: None,
-                        reasoning_options: xhigh_reasoning_options.clone(),
+                        reasoning_options: reasoning_options.clone(),
                     },
                     ModelInfo {
-                        id: "gpt-5.3-codex".to_string(),
-                        name: "GPT-5.3 Codex".to_string(),
+                        id: "gpt-5.6-luna".to_string(),
+                        name: "GPT-5.6 Luna".to_string(),
                         provider_id: None,
-                        reasoning_options: xhigh_reasoning_options,
+                        reasoning_options,
                     },
                 ],
                 permissions: vec![
@@ -454,7 +537,6 @@ impl Codex {
             }
             None => None,
             Some(AskForApproval::UnlessTrusted) => Some(V2AskForApproval::UnlessTrusted),
-            Some(AskForApproval::OnFailure) => Some(V2AskForApproval::OnFailure),
             Some(AskForApproval::OnRequest) => Some(V2AskForApproval::OnRequest),
             Some(AskForApproval::Never) => Some(V2AskForApproval::Never),
         };
@@ -490,13 +572,13 @@ impl Codex {
 
         let (model, is_fast) = resolve_model(self.model.as_deref());
         let service_tier = if is_fast {
-            Some(Some(ServiceTier::Fast))
+            Some(Some("fast".to_string()))
         } else {
             None
         };
 
         // Per-message Codex provider injection. When the user picks a non-Default
-        // provider record for this message, `Provider::build_codex_injection`
+        // provider record for this message, `Codex::build_provider_injection`
         // emits dotted-path overrides (`model_providers.cdt.{name,base_url,
         // env_key,wire_api}`) that get merged into Codex's free-form `config`
         // map and a `model_provider` id ("cdt") that selects them. The
@@ -505,7 +587,7 @@ impl Codex {
         // `config.toml` on disk are never touched (plan §3.2 / Phase C
         // verification target).
         let mut model_provider = self.model_provider.clone();
-        if let Some(injection) = env.provider_codex.as_ref() {
+        if let Some(injection) = env.structured::<CodexProviderInjection>(BaseCodingAgent::Codex) {
             let map = config.get_or_insert_with(HashMap::new);
             for (k, v) in &injection.config_overrides {
                 map.insert(k.clone(), v.clone());
@@ -734,7 +816,10 @@ impl Codex {
                             .await
                             .ok();
                         exit_signal_tx
-                            .send_exit_signal(ExecutorExitResult::Failure)
+                            .send_exit_signal(ExecutorExitResult::Failure(Some(
+                                NormalizedExecutionOutcome::new(ExecutionOutcomeClass::AuthExpired)
+                                    .with_provider_code("auth_required"),
+                            )))
                             .await;
                         return;
                     }
@@ -747,7 +832,7 @@ impl Codex {
                     }
                 }
                 exit_signal_tx
-                    .send_exit_signal(ExecutorExitResult::Failure)
+                    .send_exit_signal(ExecutorExitResult::Failure(None))
                     .await;
             }
         });

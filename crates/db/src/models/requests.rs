@@ -64,6 +64,7 @@ pub struct UpdateWorkspace {
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct UpdateSession {
     pub name: Option<String>,
+    pub parent_session_id: Option<Uuid>,
 }
 
 /// Atomic reorder of the pinned-workspace list. The provided `ordered_ids`

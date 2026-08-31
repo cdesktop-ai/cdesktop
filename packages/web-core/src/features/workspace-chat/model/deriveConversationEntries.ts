@@ -1,4 +1,9 @@
-import { NormalizedEntry, PatchType, TokenUsageInfo } from 'shared/types';
+import {
+  NormalizedEntry,
+  PatchType,
+  PromptKind,
+  TokenUsageInfo,
+} from 'shared/types';
 
 import {
   makeLoadingPatch,
@@ -28,12 +33,14 @@ interface DeriveConversationEntriesParams {
 function patchWithKey(
   patch: PatchType,
   executionProcessId: string,
-  index: number | 'user' | 'script'
+  index: number | 'user' | 'script',
+  promptKind?: PromptKind
 ): PatchTypeWithKey {
   return {
     ...patch,
     patchKey: `${executionProcessId}:${index}`,
     executionProcessId,
+    promptKind,
   };
 }
 
@@ -52,7 +59,8 @@ function appendAgentTurnEntries(
       patchWithKey(
         { type: 'NORMALIZED_ENTRY', content: userNormalizedEntry },
         turn.process.executionProcess.id,
-        'user'
+        'user',
+        turn.promptKind
       )
     );
   }
@@ -130,7 +138,8 @@ function appendScriptTurnEntries(
             },
           },
           processId,
-          'user'
+          'user',
+          process.initialPromptKindAfterSetup
         )
       );
     }

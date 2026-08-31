@@ -1,6 +1,9 @@
 import { createElement, type ReactNode, useContext } from 'react';
 import { createHmrContext } from '@/shared/lib/hmrContext';
-import type { AppNavigation } from '@/shared/lib/routes/appNavigation';
+import type {
+  AppNavigation,
+  RoutineNavigation,
+} from '@/shared/lib/routes/appNavigation';
 
 const AppNavigationContext = createHmrContext<AppNavigation | undefined>(
   'AppNavigationContext',
@@ -27,4 +30,14 @@ export function useAppNavigation(): AppNavigation {
   }
 
   return appNavigation;
+}
+
+export function useRoutineNavigation(): RoutineNavigation {
+  const routineNavigation = useAppNavigation().routines;
+
+  if (!routineNavigation) {
+    throw new Error('Routine navigation is not available in this host');
+  }
+
+  return routineNavigation;
 }

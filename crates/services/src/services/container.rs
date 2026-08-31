@@ -17,9 +17,11 @@ use db::{
         execution_process_repo_state::{
             CreateExecutionProcessRepoState, ExecutionProcessRepoState,
         },
+        metered_approval::{MeteredApproval, MeteredApprovalPolicy, MeteredGateDecision},
         repo::Repo,
         routine_run::RoutineRun,
         session::{CreateSession, Session, SessionError},
+        session_command::{SessionCommand, SessionCommandConfig},
         workspace::{Workspace, WorkspaceError, WorkspaceSource},
         workspace_repo::WorkspaceRepo,
     },
@@ -31,7 +33,8 @@ use executors::profile::ExecutorConfigs;
 use executors::{
     actions::{
         ExecutorAction, ExecutorActionType,
-        coding_agent_initial::CodingAgentInitialRequest,
+        coding_agent_follow_up::CodingAgentFollowUpRequest,
+        coding_agent_initial::{CodingAgentInitialRequest, PromptKind},
         script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
     },
     executors::{ExecutorError, StandardCodingAgentExecutor},
@@ -43,13 +46,17 @@ use executors::{
         },
     },
     profile::{ExecutorConfig, ExecutorProfileId},
+    provider::ProviderInjection,
 };
 use futures::{StreamExt, future, stream::BoxStream};
 use git::{GitService, GitServiceError};
 use json_patch::Patch;
 use sqlx::Error as SqlxError;
 use thiserror::Error;
-use tokio::{sync::RwLock, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
+};
 use utils::{
     log_msg::LogMsg,
     msg_store::MsgStore,
@@ -58,8 +65,16 @@ use utils::{
 use uuid::Uuid;
 use worktree_manager::WorktreeError;
 
-use crate::services::{execution_process, notification::NotificationService};
+use crate::services::{auth_binding, execution_process, notification::NotificationService};
 pub type ContainerRef = String;
+
+fn max_running_agents() -> i64 {
+    std::env::var("CDESKTOP_MAX_RUNNING_AGENTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &i64| *value > 0)
+        .unwrap_or(4)
+}
 
 #[derive(Debug, Error)]
 pub enum ContainerError {
@@ -94,6 +109,8 @@ pub trait ContainerService {
     fn git(&self) -> &GitService;
 
     fn notification_service(&self) -> &NotificationService;
+
+    fn scheduler_lock(&self) -> &Mutex<()>;
 
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError>;
 
@@ -259,10 +276,8 @@ pub trait ContainerService {
             let pool = &self.db().pool;
             match RoutineRun::find_active_by_workspace(pool, ctx.workspace.id).await {
                 Ok(Some(run)) => {
-                    let failed = matches!(
-                        ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed
-                    );
+                    let failed =
+                        matches!(ctx.execution_process.status, ExecutionProcessStatus::Failed);
                     if let Err(e) =
                         RoutineRun::mark_done(pool, run.id, chrono::Utc::now(), failed).await
                     {
@@ -341,6 +356,7 @@ pub trait ContainerService {
                 );
                 continue;
             }
+            SessionCommand::release_execution(&self.db().pool, process.id).await?;
             // Capture after-head commit OID per repository
             if let Ok(ctx) = ExecutionProcess::load_context(&self.db().pool, process.id).await {
                 for repo in &ctx.repos {
@@ -367,6 +383,223 @@ pub trait ContainerService {
             }
             // Process marked as failed
             tracing::info!("Marked orphaned execution process {} as failed", process.id);
+        }
+        Ok(())
+    }
+
+    async fn dispatch_pending_commands(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Option<ExecutionProcess>, ContainerError> {
+        let _scheduler = self.scheduler_lock().lock().await;
+        let pool = &self.db().pool;
+        if ExecutionProcess::has_running_coding_agent_for_session(pool, session_id).await? {
+            return Ok(None);
+        }
+        let max_running = max_running_agents();
+        if ExecutionProcess::count_running_coding_agents(pool).await? >= max_running {
+            return Ok(None);
+        }
+
+        // Metered approval gate (plan §12): consult the durable policy for
+        // the head of the queue before claiming. `ask` creates/awaits its
+        // durable approval, `never` blocks with a routes_exhausted record —
+        // in both held cases nothing is claimed and no attempt is spent.
+        let pending = SessionCommand::pending(pool, session_id).await?;
+        if let Some(head) = pending.first() {
+            match MeteredApproval::gate(pool, head).await? {
+                MeteredGateDecision::Proceed => {}
+                MeteredGateDecision::AwaitApproval | MeteredGateDecision::Blocked => {
+                    return Ok(None);
+                }
+            }
+        }
+
+        // A crash between claim and bind leaves a claimed batch with no
+        // execution row. Claims and binds only happen under this scheduler
+        // lock, so any unbound claim seen here is a leftover - return it to
+        // the queue before claiming again.
+        SessionCommand::release_unbound(pool, session_id).await?;
+        let execution_id = Uuid::new_v4();
+        let commands = SessionCommand::claim_pending(pool, session_id).await?;
+        let Some(first) = commands.first() else {
+            return Ok(None);
+        };
+        // The queue can change between the gate peek and the claim (e.g. a
+        // replace command). Re-verify the claimed head and release the claim
+        // if its gate is not open, so a metered command can never launch
+        // without its durable authorization.
+        match MeteredApproval::gate(pool, first).await? {
+            MeteredGateDecision::Proceed => {}
+            MeteredGateDecision::AwaitApproval | MeteredGateDecision::Blocked => {
+                SessionCommand::release_unbound(pool, session_id).await?;
+                return Ok(None);
+            }
+        }
+        // Metered bookkeeping for the winning claim: consume the approval
+        // (allow-once) or durably record the auto-start notification.
+        if let Some(metered) = &first.config.0.metered {
+            match metered.policy {
+                MeteredApprovalPolicy::Ask => {
+                    MeteredApproval::consume_approval(pool, first.id, execution_id).await?;
+                }
+                MeteredApprovalPolicy::Auto => {
+                    MeteredApproval::record_auto_start(
+                        pool,
+                        first.id,
+                        execution_id,
+                        metered.account_alias.as_deref(),
+                    )
+                    .await?;
+                }
+                MeteredApprovalPolicy::Never => {
+                    SessionCommand::release_unbound(pool, session_id).await?;
+                    return Ok(None);
+                }
+            }
+        }
+        let first_config = first.config.clone();
+        let commands = commands
+            .into_iter()
+            .take_while(|command| command.config == first_config)
+            .collect::<Vec<_>>();
+        let first = &commands[0];
+        let command_config = first.config.0.clone();
+        let mut executor_config = command_config.executor_config.clone();
+        let selected_provider_id = command_config.selected_provider_id;
+        let prompt = commands
+            .iter()
+            .map(|command| command.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let result = async {
+            let session = Session::find_by_id(pool, session_id)
+                .await?
+                .ok_or(SessionError::NotFound)?;
+            let workspace = Workspace::find_by_id(pool, session.workspace_id)
+                .await?
+                .ok_or(WorkspaceError::WorkspaceNotFound)?;
+            self.ensure_container_exists(&workspace).await?;
+
+            let profile = executor_config.profile_id();
+            let expected = ExecutionProcess::latest_executor_profile_for_session(pool, session.id)
+                .await?
+                .map(|value| value.executor.to_string())
+                .or_else(|| session.executor.clone());
+            if let Some(expected) = expected {
+                let actual = profile.executor.to_string();
+                if expected != actual {
+                    return Err(SessionError::ExecutorMismatch { expected, actual }.into());
+                }
+            }
+            if session.executor.is_none() {
+                Session::update_executor(pool, session.id, &profile.executor.to_string()).await?;
+            }
+
+            // Resolve the auth binding to credential material immediately
+            // before launch. The resolved injection stays in memory only:
+            // the persisted action is stripped via `without_provider_bindings`
+            // and the runtime fields are non-serializable by construction.
+            let resolved =
+                auth_binding::resolve_for_launch(pool, &command_config, &mut executor_config)
+                    .await
+                    .map_err(|error| ContainerError::Other(error.into()))?;
+
+            let working_dir = session
+                .agent_working_dir
+                .as_ref()
+                .filter(|dir| !dir.is_empty())
+                .cloned();
+            let action_type = match CodingAgentTurn::find_latest_session_info(pool, session.id)
+                .await?
+            {
+                Some(info) => {
+                    ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
+                        prompt,
+                        session_id: info.session_id,
+                        reset_to_message_id: None,
+                        executor_config: executor_config.clone(),
+                        working_dir,
+                    })
+                }
+                None => ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
+                    prompt,
+                    prompt_kind: PromptKind::User,
+                    executor_config: executor_config.clone(),
+                    working_dir,
+                }),
+            };
+            let mut action = ExecutorAction::new(action_type, None);
+            action = action.with_provider_injection(resolved.injection);
+            action = action.with_provider_selection(
+                selected_provider_id.map(|id| id.to_string()),
+                executor_config.model_id.clone(),
+            );
+            self.start_execution_with_id(
+                &workspace,
+                &session,
+                &action,
+                &ExecutionProcessRunReason::CodingAgent,
+                execution_id,
+                true,
+            )
+            .await
+        }
+        .await;
+
+        if result.is_err() {
+            SessionCommand::finish_execution(pool, execution_id, false).await?;
+        }
+        result.map(Some)
+    }
+
+    /// A freshly started server owns no child processes, so every execution
+    /// still marked running at boot is an orphan from a previous process.
+    /// Terminalize them and return their claimed commands to the queue so the
+    /// four-slot coding-agent cap can never be filled by ghosts (the durable
+    /// queue froze fleet-wide this way once).
+    async fn terminalize_inherited_executions(&self) -> Result<(), ContainerError> {
+        let pool = &self.db().pool;
+        for process in ExecutionProcess::find_running(pool).await? {
+            if process.run_reason != ExecutionProcessRunReason::CodingAgent {
+                continue;
+            }
+            tracing::warn!(
+                execution_process_id = %process.id,
+                session_id = %process.session_id,
+                "terminalizing execution inherited as running from a previous server process"
+            );
+            ExecutionProcess::update_completion(
+                pool,
+                process.id,
+                ExecutionProcessStatus::Killed,
+                None,
+            )
+            .await?;
+            SessionCommand::requeue_killed_execution(pool, process.id).await?;
+        }
+        Ok(())
+    }
+
+    async fn dispatch_all_pending_commands(&self) -> Result<(), ContainerError> {
+        for session_id in SessionCommand::pending_session_ids(&self.db().pool).await? {
+            match self.dispatch_pending_commands(session_id).await {
+                Ok(None)
+                    if ExecutionProcess::count_running_coding_agents(&self.db().pool).await?
+                        >= max_running_agents() =>
+                {
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "failed session command did not block the fleet"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -556,6 +789,7 @@ pub trait ContainerService {
                     &CreateSession {
                         executor: None,
                         name: None,
+                        parent_session_id: None,
                     },
                     Uuid::new_v4(),
                     workspace.id,
@@ -1104,10 +1338,32 @@ pub trait ContainerService {
         workspace: &Workspace,
         executor_config: ExecutorConfig,
         prompt: String,
-        provider_env: Option<HashMap<String, String>>,
-        provider_codex: Option<executors::env::CodexProviderInjection>,
+        injection: ProviderInjection,
         selected_provider_id: Option<String>,
         selected_model_id: Option<String>,
+    ) -> Result<ExecutionProcess, ContainerError> {
+        self.start_workspace_with_session_id(
+            workspace,
+            executor_config,
+            prompt,
+            injection,
+            selected_provider_id,
+            selected_model_id,
+            Uuid::new_v4(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_workspace_with_session_id(
+        &self,
+        workspace: &Workspace,
+        executor_config: ExecutorConfig,
+        prompt: String,
+        injection: ProviderInjection,
+        selected_provider_id: Option<String>,
+        selected_model_id: Option<String>,
+        session_id: Uuid,
     ) -> Result<ExecutionProcess, ContainerError> {
         // Create container
         self.create(workspace).await?;
@@ -1124,8 +1380,9 @@ pub trait ContainerService {
             &CreateSession {
                 executor: Some(executor_config.executor.to_string()),
                 name: None,
+                parent_session_id: None,
             },
-            Uuid::new_v4(),
+            session_id,
             workspace.id,
         )
         .await?;
@@ -1151,17 +1408,13 @@ pub trait ContainerService {
             let mut a = ExecutorAction::new(
                 ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
                     prompt,
+                    prompt_kind: PromptKind::User,
                     executor_config: executor_config.clone(),
                     working_dir,
                 }),
                 None,
             );
-            if let Some(env) = provider_env {
-                a = a.with_provider_env(env);
-            }
-            if let Some(codex) = provider_codex {
-                a = a.with_provider_codex(codex);
-            }
+            a = a.with_provider_injection(injection);
             a.with_provider_selection(selected_provider_id, selected_model_id)
         };
 
@@ -1219,6 +1472,26 @@ pub trait ContainerService {
         executor_action: &ExecutorAction,
         run_reason: &ExecutionProcessRunReason,
     ) -> Result<ExecutionProcess, ContainerError> {
+        self.start_execution_with_id(
+            workspace,
+            session,
+            executor_action,
+            run_reason,
+            Uuid::new_v4(),
+            false,
+        )
+        .await
+    }
+
+    async fn start_execution_with_id(
+        &self,
+        workspace: &Workspace,
+        session: &Session,
+        executor_action: &ExecutorAction,
+        run_reason: &ExecutionProcessRunReason,
+        execution_process_id: Uuid,
+        claim_pending_commands: bool,
+    ) -> Result<ExecutionProcess, ContainerError> {
         // Create new execution process record
         // Capture current HEAD per repository as the "before" commit for this execution
         let repositories =
@@ -1244,17 +1517,82 @@ pub trait ContainerService {
         }
         let create_execution_process = CreateExecutionProcess {
             session_id: session.id,
-            executor_action: executor_action.clone(),
+            executor_action: executor_action.without_provider_bindings(),
             run_reason: run_reason.clone(),
         };
 
         let execution_process = ExecutionProcess::create(
             &self.db().pool,
             &create_execution_process,
-            Uuid::new_v4(),
+            execution_process_id,
             &repo_states,
         )
         .await?;
+        if *run_reason == ExecutionProcessRunReason::CodingAgent {
+            // Stamp the claimed batch now that the execution row exists (the
+            // FK forbids stamping at claim time) and before the child spawns,
+            // so completion callbacks always find their commands.
+            if claim_pending_commands
+                && SessionCommand::bind_execution(&self.db().pool, session.id, execution_process.id)
+                    .await?
+                    == 0
+            {
+                ExecutionProcess::update_completion(
+                    &self.db().pool,
+                    execution_process.id,
+                    ExecutionProcessStatus::Failed,
+                    None,
+                )
+                .await?;
+                return Err(ContainerError::Other(anyhow!(
+                    "No claimed session command for execution attempt {}",
+                    execution_process.id
+                )));
+            }
+            let command = match executor_action.typ() {
+                ExecutorActionType::CodingAgentInitialRequest(request) => {
+                    Some((request.prompt.clone(), request.executor_config.clone()))
+                }
+                ExecutorActionType::CodingAgentFollowUpRequest(request) => {
+                    Some((request.prompt.clone(), request.executor_config.clone()))
+                }
+                ExecutorActionType::ReviewRequest(request) => {
+                    Some((request.prompt.clone(), request.executor_config.clone()))
+                }
+                ExecutorActionType::ScriptRequest(_) => None,
+            };
+            if !claim_pending_commands
+                && let Some((body, executor_config)) = command
+                && let Err(error) = SessionCommand::ensure_claimed(
+                    &self.db().pool,
+                    session.id,
+                    execution_process.id,
+                    body,
+                    SessionCommandConfig {
+                        executor_config,
+                        selected_provider_id: executor_action
+                            .selected_provider_id
+                            .as_deref()
+                            .and_then(|id| id.parse().ok()),
+                        auth_binding_id: executor_action
+                            .selected_provider_id
+                            .as_deref()
+                            .and_then(|id| id.parse().ok()),
+                        metered: None,
+                    },
+                )
+                .await
+            {
+                ExecutionProcess::update_completion(
+                    &self.db().pool,
+                    execution_process.id,
+                    ExecutionProcessStatus::Failed,
+                    None,
+                )
+                .await?;
+                return Err(error.into());
+            }
+        }
         self.msg_stores()
             .write()
             .await
@@ -1307,23 +1645,21 @@ pub trait ContainerService {
             if let (Some(model_id), Some(provider_id)) = (
                 executor_action.selected_model_id.as_deref(),
                 executor_action.selected_provider_id.as_deref(),
-            ) {
-                if !model_id.is_empty() && !provider_id.is_empty() {
-                    if let Err(e) = CodingAgentTurn::update_selected_model_provider(
-                        &self.db().pool,
-                        execution_process.id,
-                        model_id,
-                        provider_id,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            execution_process_id = %execution_process.id,
-                            error = %e,
-                            "failed to persist model/provider selection on turn"
-                        );
-                    }
-                }
+            ) && !model_id.is_empty()
+                && !provider_id.is_empty()
+                && let Err(e) = CodingAgentTurn::update_selected_model_provider(
+                    &self.db().pool,
+                    execution_process.id,
+                    model_id,
+                    provider_id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    execution_process_id = %execution_process.id,
+                    error = %e,
+                    "failed to persist model/provider selection on turn"
+                );
             }
         }
 
@@ -1348,6 +1684,15 @@ pub trait ContainerService {
                     "Failed to mark execution process {} as failed after start error: {}",
                     execution_process.id,
                     update_error
+                );
+            }
+            if let Err(command_error) =
+                SessionCommand::finish_execution(&self.db().pool, execution_process.id, false).await
+            {
+                tracing::error!(
+                    "Failed to fail commands for execution {} after start error: {}",
+                    execution_process.id,
+                    command_error
                 );
             }
             // Emit stderr error message

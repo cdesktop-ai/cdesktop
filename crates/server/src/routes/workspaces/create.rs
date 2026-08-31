@@ -11,6 +11,7 @@ use deployment::Deployment;
 use services::services::container::ContainerService;
 use utils::response::ApiResponse;
 use uuid::Uuid;
+use workspace_manager::WorkspaceManager;
 
 use crate::{
     DeploymentImpl,
@@ -26,7 +27,15 @@ pub(crate) async fn create_workspace_record(
     name: Option<String>,
     use_worktree: bool,
 ) -> Result<Workspace, ApiError> {
-    let workspace_id = Uuid::new_v4();
+    create_workspace_record_with_id(deployment, name, use_worktree, Uuid::new_v4()).await
+}
+
+pub(crate) async fn create_workspace_record_with_id(
+    deployment: &DeploymentImpl,
+    name: Option<String>,
+    use_worktree: bool,
+    workspace_id: Uuid,
+) -> Result<Workspace, ApiError> {
     let branch_label = name
         .as_deref()
         .filter(|branch_label| !branch_label.is_empty())
@@ -213,10 +222,116 @@ fn rewrite_imported_issue_attachments_markdown(
     rewritten
 }
 
+async fn cleanup_failed_workspace_start(deployment: &DeploymentImpl, workspace_id: Uuid) {
+    let pool = &deployment.db().pool;
+    let workspace = match Workspace::find_by_id(pool, workspace_id).await {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load workspace {} during failed start cleanup: {}",
+                workspace_id,
+                e
+            );
+            return;
+        }
+    };
+
+    if let Err(e) = deployment.container().delete(&workspace).await {
+        tracing::warn!(
+            "Failed to stop and clean container for workspace {} during failed start cleanup: {}",
+            workspace_id,
+            e
+        );
+    }
+
+    let managed_workspace = match deployment
+        .workspace_manager()
+        .load_managed_workspace(workspace.clone())
+        .await
+    {
+        Ok(managed_workspace) => managed_workspace,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load managed workspace {} during failed start cleanup: {}",
+                workspace_id,
+                e
+            );
+            if let Err(delete_error) = Workspace::delete(pool, workspace_id).await {
+                tracing::warn!(
+                    "Failed to delete workspace {} after managed cleanup load failed: {}",
+                    workspace_id,
+                    delete_error
+                );
+            }
+            return;
+        }
+    };
+
+    let deletion_context = match managed_workspace.prepare_deletion_context().await {
+        Ok(deletion_context) => deletion_context,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to prepare deletion context for workspace {} during failed start cleanup: {}",
+                workspace_id,
+                e
+            );
+            if let Err(delete_error) = managed_workspace.delete_record().await {
+                tracing::warn!(
+                    "Failed to delete workspace {} after deletion context failed: {}",
+                    workspace_id,
+                    delete_error
+                );
+            }
+            return;
+        }
+    };
+
+    if let Err(e) = managed_workspace.delete_record().await {
+        tracing::warn!(
+            "Failed to delete workspace {} during failed start cleanup: {}",
+            workspace_id,
+            e
+        );
+        return;
+    }
+
+    if let Err(e) =
+        WorkspaceManager::cleanup_deletion_context(deletion_context, workspace.use_worktree).await
+    {
+        tracing::warn!(
+            "Failed to clean deletion context for workspace {} during failed start cleanup: {}",
+            workspace_id,
+            e
+        );
+    }
+}
+
+async fn cleanup_failed_workspace_start_and_return<T>(
+    deployment: &DeploymentImpl,
+    workspace_id: Uuid,
+    error: ApiError,
+) -> Result<T, ApiError> {
+    cleanup_failed_workspace_start(deployment, workspace_id).await;
+    Err(error)
+}
+
 pub async fn create_and_start_workspace(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateAndStartWorkspaceRequest>,
 ) -> Result<ResponseJson<ApiResponse<CreateAndStartWorkspaceResponse>>, ApiError> {
+    let result =
+        create_and_start_workspace_with_ids(&deployment, payload, Uuid::new_v4(), Uuid::new_v4())
+            .await?;
+    Ok(ResponseJson(ApiResponse::success(result)))
+}
+
+pub(crate) async fn create_and_start_workspace_with_ids(
+    deployment: &DeploymentImpl,
+    payload: CreateAndStartWorkspaceRequest,
+    workspace_id: Uuid,
+    session_id: Uuid,
+) -> Result<CreateAndStartWorkspaceResponse, ApiError> {
     let CreateAndStartWorkspaceRequest {
         name,
         repos,
@@ -251,16 +366,36 @@ pub async fn create_and_start_workspace(
         ));
     }
 
-    let mut managed_workspace = deployment
+    let workspace =
+        create_workspace_record_with_id(deployment, name, use_worktree, workspace_id).await?;
+    let mut managed_workspace = match deployment
         .workspace_manager()
-        .load_managed_workspace(create_workspace_record(&deployment, name, use_worktree).await?)
-        .await?;
+        .load_managed_workspace(workspace)
+        .await
+    {
+        Ok(managed_workspace) => managed_workspace,
+        Err(e) => {
+            return cleanup_failed_workspace_start_and_return(
+                deployment,
+                workspace_id,
+                ApiError::from(e),
+            )
+            .await;
+        }
+    };
 
     for repo in &repos {
-        managed_workspace
+        if let Err(e) = managed_workspace
             .add_repository(repo, deployment.git())
             .await
-            .map_err(ApiError::from)?;
+        {
+            return cleanup_failed_workspace_start_and_return(
+                deployment,
+                workspace_id,
+                ApiError::from(e),
+            )
+            .await;
+        }
     }
 
     // Worktree-disabled + Git: check out the target branch the user picked in
@@ -273,9 +408,16 @@ pub async fn create_and_start_workspace(
         let git = deployment.git();
         let current = git.get_current_branch(&first_repo.repo.path).ok();
         let already_on_branch = current.as_deref() == Some(first_repo.target_branch.as_str());
-        if !already_on_branch {
-            git.checkout_branch(&first_repo.repo.path, &first_repo.target_branch, false)
-                .map_err(|e| ApiError::Workspace(WorkspaceError::ValidationError(e.to_string())))?;
+        if !already_on_branch
+            && let Err(e) =
+                git.checkout_branch(&first_repo.repo.path, &first_repo.target_branch, false)
+        {
+            return cleanup_failed_workspace_start_and_return(
+                deployment,
+                workspace_id,
+                ApiError::Workspace(WorkspaceError::ValidationError(e.to_string())),
+            )
+            .await;
         }
     }
 
@@ -286,12 +428,20 @@ pub async fn create_and_start_workspace(
         && let Some(first_repo) = managed_workspace.repos.first()
         && let Ok(current_branch) = deployment.git().get_current_branch(&first_repo.repo.path)
     {
-        db::models::workspace::Workspace::update_branch_name(
+        if let Err(e) = db::models::workspace::Workspace::update_branch_name(
             &deployment.db().pool,
             managed_workspace.workspace.id,
             &current_branch,
         )
-        .await?;
+        .await
+        {
+            return cleanup_failed_workspace_start_and_return(
+                deployment,
+                workspace_id,
+                ApiError::from(e),
+            )
+            .await;
+        }
         managed_workspace.workspace.branch = current_branch;
     }
 
@@ -300,17 +450,32 @@ pub async fn create_and_start_workspace(
     if let Some(first_repo) = managed_workspace.repos.first()
         && !first_repo.repo.is_git
     {
-        db::models::workspace::Workspace::update_branch_name(
+        if let Err(e) = db::models::workspace::Workspace::update_branch_name(
             &deployment.db().pool,
             managed_workspace.workspace.id,
             "",
         )
-        .await?;
+        .await
+        {
+            return cleanup_failed_workspace_start_and_return(
+                deployment,
+                workspace_id,
+                ApiError::from(e),
+            )
+            .await;
+        }
         managed_workspace.workspace.branch = String::new();
     }
 
-    if let Some(ids) = &attachment_ids {
-        managed_workspace.associate_attachments(ids).await?;
+    if let Some(ids) = &attachment_ids
+        && let Err(e) = managed_workspace.associate_attachments(ids).await
+    {
+        return cleanup_failed_workspace_start_and_return(
+            deployment,
+            workspace_id,
+            ApiError::from(e),
+        )
+        .await;
     }
 
     if let Some(linked_issue) = &linked_issue
@@ -358,18 +523,29 @@ pub async fn create_and_start_workspace(
     let workspace = managed_workspace.workspace.clone();
     tracing::info!("Created workspace {}", workspace.id);
 
-    let execution_process = deployment
+    let execution_process = match deployment
         .container()
-        .start_workspace(
+        .start_workspace_with_session_id(
             &workspace,
             executor_config.clone(),
             workspace_prompt,
-            injection.env,
-            injection.codex,
+            injection,
             selected_provider_id_str,
             selected_model_id_str,
+            session_id,
         )
-        .await?;
+        .await
+    {
+        Ok(execution_process) => execution_process,
+        Err(e) => {
+            return cleanup_failed_workspace_start_and_return(
+                deployment,
+                workspace_id,
+                ApiError::from(e),
+            )
+            .await;
+        }
+    };
 
     deployment
         .track_if_analytics_allowed(
@@ -382,12 +558,10 @@ pub async fn create_and_start_workspace(
         )
         .await;
 
-    Ok(ResponseJson(ApiResponse::success(
-        CreateAndStartWorkspaceResponse {
-            workspace,
-            execution_process,
-        },
-    )))
+    Ok(CreateAndStartWorkspaceResponse {
+        workspace,
+        execution_process,
+    })
 }
 
 #[cfg(test)]

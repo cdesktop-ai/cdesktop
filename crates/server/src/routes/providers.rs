@@ -125,7 +125,7 @@ pub async fn fetch_provider_models(
 ) -> Result<ResponseJson<ApiResponse<FetchModelsResponse>>, ApiError> {
     let models = fetch_models(&body.base_url, &body.api_key, body.models_url.as_deref())
         .await
-        .map_err(|e| ApiError::BadRequest(e))?;
+        .map_err(ApiError::BadRequest)?;
 
     Ok(ResponseJson(ApiResponse::success(FetchModelsResponse {
         models,

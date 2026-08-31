@@ -27,7 +27,6 @@ use services::services::{
     filesystem::FilesystemService,
     oauth_credentials::OAuthCredentials,
     pr_monitor::PrMonitorService,
-    queued_message::QueuedMessageService,
     remote_client::{RemoteClient, RemoteClientError},
     repo::RepoService,
 };
@@ -63,7 +62,6 @@ pub struct LocalDeployment {
     events: EventService,
     file_search_cache: Arc<FileSearchCache>,
     approvals: Approvals,
-    queued_message_service: QueuedMessageService,
     remote_client: Result<RemoteClient, RemoteClientNotConfigured>,
     auth_context: AuthContext,
     oauth_handoffs: Arc<RwLock<HashMap<Uuid, PendingHandoff>>>,
@@ -158,8 +156,6 @@ impl Deployment for LocalDeployment {
         }
 
         let approvals = Approvals::new();
-        let queued_message_service = QueuedMessageService::new();
-
         let oauth_credentials = Arc::new(OAuthCredentials::new(credentials_path()));
         if let Err(e) = oauth_credentials.load().await {
             tracing::warn!(?e, "failed to load OAuth credentials");
@@ -229,7 +225,6 @@ impl Deployment for LocalDeployment {
             file.clone(),
             analytics_ctx,
             approvals.clone(),
-            queued_message_service.clone(),
             remote_client.clone().ok(),
         )
         .await;
@@ -277,7 +272,6 @@ impl Deployment for LocalDeployment {
             events,
             file_search_cache,
             approvals,
-            queued_message_service,
             remote_client,
             auth_context,
             oauth_handoffs,
@@ -344,10 +338,6 @@ impl Deployment for LocalDeployment {
 
     fn approvals(&self) -> &Approvals {
         &self.approvals
-    }
-
-    fn queued_message_service(&self) -> &QueuedMessageService {
-        &self.queued_message_service
     }
 
     fn auth_context(&self) -> &AuthContext {

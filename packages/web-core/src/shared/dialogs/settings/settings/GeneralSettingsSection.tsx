@@ -57,6 +57,11 @@ import {
 } from './SettingsComponents';
 import { useSettingsDirty } from './SettingsDirtyContext';
 
+// Offered idle windows, in days. The shortest is the backend's
+// MIN_AUTO_ARCHIVE_IDLE_DAYS floor, so the picker cannot express a threshold
+// that would let auto-archive outrun the 72-hour worktree retention window.
+const AUTO_ARCHIVE_IDLE_DAY_OPTIONS = [3, 7, 14, 30] as const;
+
 export function GeneralSettingsSection() {
   const { t } = useTranslation(['settings', 'common']);
   const { setDirty: setContextDirty } = useSettingsDirty();
@@ -699,6 +704,42 @@ export function GeneralSettingsSection() {
               />
             </SettingsField>
           </>
+        )}
+      </SettingsCard>
+
+      {/* Workspaces */}
+      <SettingsCard
+        title={t('settings.general.workspaces.title')}
+        description={t('settings.general.workspaces.description')}
+      >
+        <SettingsCheckbox
+          id="auto-archive"
+          label={t('settings.general.workspaces.autoArchive.label')}
+          description={t('settings.general.workspaces.autoArchive.helper')}
+          checked={draft?.auto_archive_enabled ?? false}
+          onChange={(checked) => updateDraft({ auto_archive_enabled: checked })}
+        />
+
+        {draft?.auto_archive_enabled && (
+          <SettingsField
+            label={t('settings.general.workspaces.autoArchive.idleLabel')}
+            description={t(
+              'settings.general.workspaces.autoArchive.idleHelper'
+            )}
+          >
+            <SettingsSelect
+              value={String(draft?.auto_archive_idle_days ?? 7)}
+              options={AUTO_ARCHIVE_IDLE_DAY_OPTIONS.map((days) => ({
+                value: String(days),
+                label: t('settings.general.workspaces.autoArchive.days', {
+                  days,
+                }),
+              }))}
+              onChange={(value) =>
+                updateDraft({ auto_archive_idle_days: Number(value) })
+              }
+            />
+          </SettingsField>
         )}
       </SettingsCard>
 

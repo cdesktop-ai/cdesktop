@@ -28,7 +28,8 @@ use crate::{
     },
     logs::utils::patch,
     mcp_config::McpConfig,
-    profile::ExecutorConfig,
+    profile::{ExecutorConfig, ExecutorConfigs},
+    provider::{ProviderContext, ProviderInjection, ProviderInjectionError},
 };
 
 pub mod acp;
@@ -129,6 +130,21 @@ pub enum CodingAgent {
 }
 
 impl CodingAgent {
+    /// The adapter registered for a harness, at its default variant.
+    ///
+    /// The profile registry is the single place a harness is registered, so
+    /// it is also the single place anything downstream resolves one. A
+    /// harness with no profile has no adapter, and therefore no provider
+    /// injection, no model-id convention, and no approval brokering.
+    pub fn registered(base: BaseCodingAgent) -> Option<Self> {
+        let configs = ExecutorConfigs::get_cached();
+        let profile = configs.executors.get(&base)?;
+        profile
+            .get_variant("DEFAULT")
+            .or_else(|| profile.configurations.values().next())
+            .cloned()
+    }
+
     pub fn get_mcp_config(&self) -> McpConfig {
         match self {
             Self::Codex(_) => McpConfig::new(
@@ -230,6 +246,48 @@ pub trait StandardCodingAgentExecutor {
 
     fn use_approvals(&mut self, _approvals: Arc<dyn ExecutorApprovalService>) {}
 
+    /// Whether this harness routes tool approvals back through cdesktop.
+    ///
+    /// True exactly when [`Self::use_approvals`] keeps the service it is
+    /// handed; a harness that drops it never asks, and gets the no-op
+    /// service instead of a live bridge. `approval_wiring_matches_declaration`
+    /// holds the two in step.
+    fn brokers_approvals(&self) -> bool {
+        false
+    }
+
+    /// Wire key of this harness's payload slot on a provider record.
+    ///
+    /// The default is Claude's slot, which is what
+    /// [`Self::build_provider_injection`]'s default applier reads. A harness
+    /// that has not grown its own applier is gated out of the picker by the
+    /// record's `perAgentEnabled` until it does.
+    fn provider_slot(&self) -> &'static str {
+        "claude"
+    }
+
+    /// Spawn-time injection for the provider record the user picked.
+    ///
+    /// Only called for a record that carries its own credentials; an ambient
+    /// record never reaches an adapter, so no adapter can leak an injection
+    /// into a spawn that was meant to use the harness's own auth.
+    ///
+    /// Defaults to the Anthropic-compatible env applier — every harness that
+    /// speaks the Anthropic wire protocol needs nothing else.
+    fn build_provider_injection(
+        &self,
+        ctx: &ProviderContext,
+    ) -> Result<ProviderInjection, ProviderInjectionError> {
+        Ok(claude::anthropic_env_injection(ctx))
+    }
+
+    /// The picker-selected model id in this harness's own id form.
+    ///
+    /// Harnesses that address models by the vendor's raw id need no override.
+    fn provider_model_id(&self, ctx: &ProviderContext) -> String {
+        ctx.model_id.clone()
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,
@@ -308,12 +366,14 @@ pub trait StandardCodingAgentExecutor {
 }
 
 /// Result communicated through the exit signal
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ExecutorExitResult {
     /// Process completed successfully (exit code 0)
     Success,
-    /// Process should be marked as failed (non-zero exit)
-    Failure,
+    /// Process should be marked as failed (non-zero exit). Carries the
+    /// normalized outcome when the executor observed a stable provider
+    /// signal; `None` means unclassified.
+    Failure(Option<crate::outcome::NormalizedExecutionOutcome>),
 }
 
 /// Optional exit notification from an executor.
@@ -425,5 +485,71 @@ mod tests {
         let result: Result<BaseCodingAgent, _> = serde_json::from_str(r#""CURSOR""#);
         assert!(result.is_ok(), "CURSOR should deserialize via serde");
         assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
+    }
+}
+
+#[cfg(test)]
+mod adapter_surface_tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use serde_json::json;
+    use strum::VariantNames;
+
+    use super::*;
+    use crate::approvals::NoopExecutorApprovalService;
+
+    /// Every adapter, at its default settings — built from the enum's own
+    /// variant list so a harness added tomorrow is covered without editing
+    /// this test.
+    fn all_adapters() -> Vec<(&'static str, CodingAgent)> {
+        CodingAgent::VARIANTS
+            .iter()
+            .map(|name| {
+                let agent = serde_json::from_value(json!({ *name: {} }))
+                    .unwrap_or_else(|e| panic!("{name} must build from defaults: {e}"));
+                (*name, agent)
+            })
+            .collect()
+    }
+
+    /// The approval bridge is handed out on `brokers_approvals`, so that answer
+    /// has to be the same one `use_approvals` gives by keeping the service.
+    /// A harness that stores it but declares `false` would ask into a no-op;
+    /// one that declares `true` and drops it would hold a bridge open for
+    /// nothing.
+    #[test]
+    fn approval_wiring_matches_declaration() {
+        for (name, agent) in all_adapters() {
+            let probe: Arc<dyn ExecutorApprovalService> = Arc::new(NoopExecutorApprovalService);
+            let mut agent = agent;
+            agent.use_approvals(probe.clone());
+            let kept = Arc::strong_count(&probe) > 1;
+            assert_eq!(
+                kept,
+                agent.brokers_approvals(),
+                "{name}: use_approvals {} the service but brokers_approvals() is {}",
+                if kept { "keeps" } else { "drops" },
+                agent.brokers_approvals()
+            );
+        }
+    }
+
+    /// A harness reads its own slot and nobody else's. Two harnesses sharing a
+    /// slot would silently spend one record's credentials on the other's
+    /// endpoint.
+    #[test]
+    fn declared_slots_are_unique_per_harness() {
+        let mut seen: HashMap<&'static str, &'static str> = HashMap::new();
+        for (name, agent) in all_adapters() {
+            let slot = agent.provider_slot();
+            // The default slot is shared by every harness without its own
+            // applier; only declared slots have to be exclusive.
+            if slot == "claude" && name != "CLAUDE_CODE" {
+                continue;
+            }
+            if let Some(other) = seen.insert(slot, name) {
+                panic!("{name} and {other} both claim provider slot '{slot}'");
+            }
+        }
     }
 }

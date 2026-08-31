@@ -32,6 +32,8 @@ pub enum ConfigError {
     ValidationError(String),
 }
 
+pub use versions::v8::MIN_AUTO_ARCHIVE_IDLE_DAYS;
+
 pub type Config = versions::v8::Config;
 pub type NotificationConfig = versions::v8::NotificationConfig;
 pub type EditorConfig = versions::v8::EditorConfig;

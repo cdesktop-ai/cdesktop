@@ -1,6 +1,10 @@
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PencilSimpleIcon, ArrowUUpLeftIcon } from '@phosphor-icons/react';
+import {
+  PencilSimpleIcon,
+  ArrowUUpLeftIcon,
+  CaretDownIcon,
+} from '@phosphor-icons/react';
 import { Clipboard, Check } from 'lucide-react';
 import { cn } from '../lib/cn';
 import { Tooltip } from './Tooltip';
@@ -19,6 +23,9 @@ interface ChatUserMessageProps {
   onEdit?: () => void;
   onReset?: () => void;
   isGreyed?: boolean;
+  /** When set, the message collapses behind this header instead of showing a
+   *  clipped preview with a "show more" link. */
+  collapsedLabel?: string;
   renderMarkdown: (props: ChatUserMessageRenderProps) => ReactNode;
 }
 
@@ -31,6 +38,7 @@ export function ChatUserMessage({
   onEdit,
   onReset,
   isGreyed,
+  collapsedLabel,
   renderMarkdown,
 }: ChatUserMessageProps) {
   const { t } = useTranslation('tasks');
@@ -63,17 +71,45 @@ export function ChatUserMessage({
           'bg-accent-blue text-accent-blue-foreground'
         )}
       >
-        <div className={cn(!expanded && 'max-h-[140px] overflow-hidden')}>
-          {renderMarkdown({ content, workspaceId })}
-        </div>
-        {collapsible && (
-          <button
-            type="button"
-            onClick={onToggle}
-            className="mt-half text-xs opacity-80 hover:underline hover:opacity-100"
-          >
-            {expanded ? t('conversation.showLess') : t('conversation.showMore')}
-          </button>
+        {collapsedLabel ? (
+          <>
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-expanded={expanded}
+              className="flex items-center gap-half text-xs opacity-80 hover:opacity-100"
+            >
+              <CaretDownIcon
+                className={cn(
+                  'size-icon-xs transition-transform',
+                  !expanded && '-rotate-90'
+                )}
+              />
+              <span>{collapsedLabel}</span>
+            </button>
+            {expanded && (
+              <div className="mt-half">
+                {renderMarkdown({ content, workspaceId })}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className={cn(!expanded && 'max-h-[140px] overflow-hidden')}>
+              {renderMarkdown({ content, workspaceId })}
+            </div>
+            {collapsible && (
+              <button
+                type="button"
+                onClick={onToggle}
+                className="mt-half text-xs opacity-80 hover:underline hover:opacity-100"
+              >
+                {expanded
+                  ? t('conversation.showLess')
+                  : t('conversation.showMore')}
+              </button>
+            )}
+          </>
         )}
       </div>
 

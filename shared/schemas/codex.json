@@ -26,14 +26,13 @@
       ]
     },
     "ask_for_approval": {
-      "description": "Determines when the user is consulted to approve Codex actions.\n\n- `UnlessTrusted`: Read-only commands are auto-approved. Everything else will\n  ask the user to approve.\n- `OnFailure`: All commands run in a restricted sandbox initially. If a\n  command fails, the user is asked to approve execution without the sandbox.\n- `OnRequest`: The model decides when to ask the user for approval.\n- `Never`: Commands never ask for approval. Commands that fail in the\n  restricted sandbox are not retried.",
+      "description": "Determines when the user is consulted to approve Codex actions.\n\n- `UnlessTrusted`: Read-only commands are auto-approved. Everything else will\n  ask the user to approve.\n- `OnRequest`: The model decides when to ask the user for approval.\n- `Never`: Commands never ask for approval. Commands that fail in the\n  restricted sandbox are not retried.",
       "type": [
         "string",
         "null"
       ],
       "enum": [
         "unless-trusted",
-        "on-failure",
         "on-request",
         "never",
         null
@@ -62,6 +61,7 @@
         "medium",
         "high",
         "xhigh",
+        "max",
         null
       ]
     },

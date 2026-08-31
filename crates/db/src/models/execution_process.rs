@@ -36,6 +36,198 @@ pub enum ExecutionProcessError {
     ValidationError(String),
 }
 
+#[cfg(test)]
+mod tests {
+    use executors::{
+        actions::{
+            ExecutorAction, ExecutorActionType,
+            script::{ScriptContext, ScriptRequest, ScriptRequestLanguage},
+        },
+        outcome::{ExecutionOutcomeClass, NormalizedExecutionOutcome},
+    };
+    use sqlx::sqlite::SqlitePoolOptions;
+    use uuid::Uuid;
+
+    use super::{ExecutionProcess, ExecutionProcessStatus, ExecutorActionField};
+
+    #[test]
+    fn boxed_executor_action_preserves_json_shape() {
+        let action = ExecutorAction::new(
+            ExecutorActionType::ScriptRequest(ScriptRequest {
+                script: "echo ready".to_string(),
+                language: ScriptRequestLanguage::Bash,
+                context: ScriptContext::SetupScript,
+                working_dir: None,
+            }),
+            None,
+        );
+        let expected = serde_json::to_value(&action).unwrap();
+        let field = ExecutorActionField::ExecutorAction(Box::new(action));
+
+        assert_eq!(serde_json::to_value(&field).unwrap(), expected);
+        assert!(matches!(
+            serde_json::from_value::<ExecutorActionField>(expected).unwrap(),
+            ExecutorActionField::ExecutorAction(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn complete_running_attempt_is_exact_once() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"CREATE TABLE execution_processes (
+                id BLOB PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                completed_at TEXT
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"CREATE TABLE execution_process_outcomes (
+                execution_process_id BLOB PRIMARY KEY NOT NULL,
+                outcome TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO execution_processes (id, status, exit_code, completed_at) \
+             VALUES (?, 'running', NULL, NULL)",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            ExecutionProcess::complete_running_attempt(
+                &pool,
+                id,
+                ExecutionProcessStatus::Completed,
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !ExecutionProcess::complete_running_attempt(
+                &pool,
+                id,
+                ExecutionProcessStatus::Failed,
+                Some(1),
+                Some(&NormalizedExecutionOutcome::new(
+                    ExecutionOutcomeClass::Unknown
+                )),
+            )
+            .await
+            .unwrap()
+        );
+
+        let (status, exit_code): (String, i64) =
+            sqlx::query_as("SELECT status, exit_code FROM execution_processes WHERE id = ?")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(exit_code, 0);
+        // The losing duplicate completion must not attach its outcome either.
+        let outcomes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM execution_process_outcomes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(outcomes, 0);
+
+        let missing = ExecutionProcess::complete_running_attempt(
+            &pool,
+            Uuid::new_v4(),
+            ExecutionProcessStatus::Completed,
+            Some(0),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!missing);
+    }
+
+    #[tokio::test]
+    async fn winning_failed_attempt_records_normalized_outcome_once() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"CREATE TABLE execution_processes (
+                id BLOB PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                completed_at TEXT
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"CREATE TABLE execution_process_outcomes (
+                execution_process_id BLOB PRIMARY KEY NOT NULL,
+                outcome TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO execution_processes (id, status) VALUES (?, 'running')")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let outcome = NormalizedExecutionOutcome::new(ExecutionOutcomeClass::QuotaExhausted)
+            .with_provider_code("usage_limit_exceeded");
+        assert!(
+            ExecutionProcess::complete_running_attempt(
+                &pool,
+                id,
+                ExecutionProcessStatus::Failed,
+                Some(1),
+                Some(&outcome),
+            )
+            .await
+            .unwrap()
+        );
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT outcome FROM execution_process_outcomes WHERE execution_process_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let stored: NormalizedExecutionOutcome = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored.class, ExecutionOutcomeClass::QuotaExhausted);
+        assert_eq!(
+            stored.provider_code.as_deref(),
+            Some("usage_limit_exceeded")
+        );
+    }
+}
+
 #[derive(Debug, Clone, Type, Serialize, Deserialize, PartialEq, TS)]
 #[sqlx(type_name = "execution_process_status", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -105,7 +297,7 @@ pub struct LatestProcessInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ExecutorActionField {
-    ExecutorAction(ExecutorAction),
+    ExecutorAction(Box<ExecutorAction>),
     Other(Value),
 }
 
@@ -289,6 +481,15 @@ impl ExecutionProcess {
         Ok(count > 0)
     }
 
+    pub async fn count_running_coding_agents(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM execution_processes \
+             WHERE status = 'running' AND run_reason = 'codingagent'",
+        )
+        .fetch_one(pool)
+        .await
+    }
+
     /// Check if there are running processes (excluding dev servers) for a workspace (across all sessions)
     pub async fn has_running_non_dev_server_processes_for_workspace(
         pool: &SqlitePool,
@@ -455,9 +656,55 @@ impl ExecutionProcess {
         Ok(())
     }
 
+    /// Exact-once completion of a running attempt. The single winner also
+    /// records the normalized outcome (when provided) in the same
+    /// transaction, so a stale duplicate completion can neither flip the
+    /// status nor attach a competing classification.
+    pub async fn complete_running_attempt(
+        pool: &SqlitePool,
+        id: Uuid,
+        status: ExecutionProcessStatus,
+        exit_code: Option<i64>,
+        outcome: Option<&executors::outcome::NormalizedExecutionOutcome>,
+    ) -> Result<bool, sqlx::Error> {
+        let completed_at = if matches!(status, ExecutionProcessStatus::Running) {
+            None
+        } else {
+            Some(Utc::now())
+        };
+
+        let mut transaction = pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE execution_processes \
+             SET status = ?, exit_code = ?, completed_at = ? \
+             WHERE id = ? AND status = 'running'",
+        )
+        .bind(status)
+        .bind(exit_code)
+        .bind(completed_at)
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        let won = result.rows_affected() == 1;
+
+        if won && let Some(outcome) = outcome {
+            sqlx::query(
+                "INSERT OR IGNORE INTO execution_process_outcomes \
+                 (execution_process_id, outcome) VALUES (?, ?)",
+            )
+            .bind(id)
+            .bind(sqlx::types::Json(outcome))
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+
+        Ok(won)
+    }
+
     pub fn executor_action(&self) -> Result<&ExecutorAction, anyhow::Error> {
         match &self.executor_action.0 {
-            ExecutorActionField::ExecutorAction(action) => Ok(action),
+            ExecutorActionField::ExecutorAction(action) => Ok(action.as_ref()),
             ExecutorActionField::Other(_) => Err(anyhow::anyhow!(
                 "Executor action is not a valid ExecutorAction JSON object"
             )),

@@ -54,7 +54,9 @@ export function FolderChip({
 
   const openFolderAndSelect = useCallback(async () => {
     const path = await FolderPickerDialog.show({
-      title: t('dialogs.selectGitRepository', { defaultValue: 'Select folder' }),
+      title: t('dialogs.selectGitRepository', {
+        defaultValue: 'Select folder',
+      }),
     });
     if (!path) return;
     const repo = await repoApi.register({ path });

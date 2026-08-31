@@ -1,0 +1,17 @@
+{
+  "type": "control_request",
+  "request_id": "5583f560-7792-496e-9b63-3a04dee8eb4a",
+  "request": {
+    "subtype": "can_use_tool",
+    "tool_name": "Bash",
+    "display_name": "Bash",
+    "input": {
+      "command": "echo w2-claude-first",
+      "description": "Echo test string"
+    },
+    "description": "Echo test string",
+    "decision_reason": "Forwarding to canusetool service",
+    "decision_reason_type": "hook",
+    "tool_use_id": "toolu_014yZQcvZejoa2Z37VyohTFF"
+  }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "cdesktop-tauri"
-version = "0.2.3"
+version = "0.2.6"
 edition = "2024"
 
 [[bin]]
