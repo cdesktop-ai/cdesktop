@@ -5,7 +5,9 @@ use db::{self, DBService, models::execution_process::ExecutionProcess};
 use executors::approvals::{ExecutorApprovalError, ExecutorApprovalService};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use utils::approvals::{ApprovalOutcome, ApprovalRequest, ApprovalStatus, QuestionStatus};
+use utils::approvals::{
+    ApprovalOutcome, ApprovalPatterns, ApprovalRequest, ApprovalStatus, QuestionStatus,
+};
 use uuid::Uuid;
 
 use crate::services::{approvals::Approvals, notification::NotificationService};
@@ -40,10 +42,12 @@ impl ExecutorApprovalBridge {
     async fn create_internal(
         &self,
         tool_name: &str,
+        patterns: ApprovalPatterns,
         is_question: bool,
         question_count: Option<usize>,
     ) -> Result<String, ExecutorApprovalError> {
-        let request = ApprovalRequest::new(tool_name.to_string(), self.execution_process_id);
+        let request =
+            ApprovalRequest::new(tool_name.to_string(), self.execution_process_id, patterns);
 
         let (request, waiter) = self
             .approvals
@@ -129,8 +133,12 @@ impl ExecutorApprovalBridge {
 
 #[async_trait]
 impl ExecutorApprovalService for ExecutorApprovalBridge {
-    async fn create_tool_approval(&self, tool_name: &str) -> Result<String, ExecutorApprovalError> {
-        self.create_internal(tool_name, false, None).await
+    async fn create_tool_approval(
+        &self,
+        tool_name: &str,
+        patterns: ApprovalPatterns,
+    ) -> Result<String, ExecutorApprovalError> {
+        self.create_internal(tool_name, patterns, false, None).await
     }
 
     async fn create_question_approval(
@@ -138,8 +146,13 @@ impl ExecutorApprovalService for ExecutorApprovalBridge {
         tool_name: &str,
         question_count: usize,
     ) -> Result<String, ExecutorApprovalError> {
-        self.create_internal(tool_name, true, Some(question_count))
-            .await
+        self.create_internal(
+            tool_name,
+            ApprovalPatterns::default(),
+            true,
+            Some(question_count),
+        )
+        .await
     }
 
     async fn wait_tool_approval(
@@ -150,7 +163,7 @@ impl ExecutorApprovalService for ExecutorApprovalBridge {
         let outcome = self.wait_internal(approval_id, cancel).await?;
 
         match outcome {
-            ApprovalOutcome::Approved => Ok(ApprovalStatus::Approved),
+            ApprovalOutcome::Approved { scope } => Ok(ApprovalStatus::Approved { scope }),
             ApprovalOutcome::Denied { reason } => Ok(ApprovalStatus::Denied { reason }),
             ApprovalOutcome::TimedOut => Ok(ApprovalStatus::TimedOut),
             ApprovalOutcome::Answered { .. } => Err(ExecutorApprovalError::request_failed(
@@ -169,7 +182,7 @@ impl ExecutorApprovalService for ExecutorApprovalBridge {
         match outcome {
             ApprovalOutcome::Answered { answers } => Ok(QuestionStatus::Answered { answers }),
             ApprovalOutcome::TimedOut => Ok(QuestionStatus::TimedOut),
-            ApprovalOutcome::Approved | ApprovalOutcome::Denied { .. } => {
+            ApprovalOutcome::Approved { .. } | ApprovalOutcome::Denied { .. } => {
                 Err(ExecutorApprovalError::request_failed(
                     "unexpected permission response for question request",
                 ))

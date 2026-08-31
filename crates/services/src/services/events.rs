@@ -181,7 +181,7 @@ impl EventService {
                                 }
                                 (HookTables::Scratch, _) => {
                                     match Scratch::find_by_rowid(&db.pool, rowid).await {
-                                        Ok(Some(scratch)) => RecordTypes::Scratch(scratch),
+                                        Ok(Some(scratch)) => RecordTypes::Scratch(Box::new(scratch)),
                                         Ok(None) => RecordTypes::DeletedScratch {
                                             rowid,
                                             scratch_id: None,

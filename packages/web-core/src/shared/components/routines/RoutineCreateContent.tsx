@@ -1,9 +1,9 @@
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { CaretRightIcon, LightningIcon } from '@phosphor-icons/react';
 import type { CreateRoutine, Routine } from 'shared/types';
 import { routinesApi } from '@/shared/lib/api';
+import { useRoutineNavigation } from '@/shared/hooks/useAppNavigation';
 import { RoutineForm, type RoutineFormValues } from './RoutineForm';
 
 /**
@@ -11,17 +11,14 @@ import { RoutineForm, type RoutineFormValues } from './RoutineForm';
  */
 export function RoutineCreateContent() {
   const { t } = useTranslation('common');
-  const navigate = useNavigate();
+  const routineNavigation = useRoutineNavigation();
   const queryClient = useQueryClient();
 
   const createMutation = useMutation<Routine, Error, CreateRoutine>({
     mutationFn: (payload) => routinesApi.create(payload),
     onSuccess: (routine) => {
       queryClient.invalidateQueries({ queryKey: ['routines'] });
-      navigate({
-        to: '/routines/$routineId',
-        params: { routineId: routine.id },
-      });
+      routineNavigation.goToRoutine(routine.id);
     },
   });
 
@@ -47,7 +44,7 @@ export function RoutineCreateContent() {
       <header className="flex items-center gap-half px-double pt-double text-base text-low">
         <button
           type="button"
-          onClick={() => navigate({ to: '/routines' })}
+          onClick={routineNavigation.goToRoutines}
           className="flex items-center gap-half hover:text-normal transition-colors"
         >
           <LightningIcon className="size-icon-xs" />
@@ -63,7 +60,7 @@ export function RoutineCreateContent() {
             submitLabel={t('routines.form.submitCreate')}
             submitting={createMutation.isPending}
             onSubmit={handleSubmit}
-            onCancel={() => navigate({ to: '/routines' })}
+            onCancel={routineNavigation.goToRoutines}
           />
 
           {createMutation.isError && (

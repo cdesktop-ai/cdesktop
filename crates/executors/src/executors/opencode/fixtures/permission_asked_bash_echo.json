@@ -1,0 +1,20 @@
+{
+  "id": "evt_02cf27f10002fZt3ecY0Hkicd9",
+  "type": "permission.asked",
+  "properties": {
+    "id": "per_02cf27f10001SvchZtWnyDZ53o",
+    "sessionID": "ses_fd30d922bffeyGbmESELOpdYCu",
+    "permission": "bash",
+    "patterns": [
+      "echo w2-first"
+    ],
+    "metadata": {},
+    "always": [
+      "echo *"
+    ],
+    "tool": {
+      "messageID": "msg_02cf26de1001lbj3t23ty5M34O",
+      "callID": "chatcmpl-tool-099a066d26e4446f9aaf14067b083ffa"
+    }
+  }
+}

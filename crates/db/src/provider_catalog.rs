@@ -32,6 +32,14 @@ pub struct CatalogPreset {
     pub enabled_models: Vec<String>,
 }
 
+pub fn load_catalog() -> &'static ProviderCatalog {
+    use std::sync::OnceLock;
+    static CATALOG: OnceLock<ProviderCatalog> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        serde_json::from_str(CATALOG_JSON).expect("provider_catalog.json is malformed")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,12 +56,4 @@ mod tests {
             "catalog must have a SHA pin"
         );
     }
-}
-
-pub fn load_catalog() -> &'static ProviderCatalog {
-    use std::sync::OnceLock;
-    static CATALOG: OnceLock<ProviderCatalog> = OnceLock::new();
-    CATALOG.get_or_init(|| {
-        serde_json::from_str(CATALOG_JSON).expect("provider_catalog.json is malformed")
-    })
 }

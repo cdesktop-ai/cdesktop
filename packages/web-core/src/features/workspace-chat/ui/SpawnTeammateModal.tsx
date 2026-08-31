@@ -126,8 +126,6 @@ function translateTeammateError(
       return t('conversation.team.errorNameInvalid');
     case 'WORKSPACE_ARCHIVED':
       return t('conversation.team.errorWorkspaceArchived');
-    case 'NOT_LEAD':
-      return t('conversation.team.errorNotLead');
     default:
       return err.message || t('conversation.team.errorGeneric');
   }

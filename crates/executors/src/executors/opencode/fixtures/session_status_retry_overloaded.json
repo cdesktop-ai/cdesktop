@@ -1,0 +1,9 @@
+{
+  "sessionID": "ses_fd4278141ffePM6F6t5mnzjSv8",
+  "status": {
+    "type": "retry",
+    "attempt": 6,
+    "message": "Provider is overloaded",
+    "next": 1787442131670
+  }
+}

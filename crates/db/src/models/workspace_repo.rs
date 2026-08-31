@@ -9,11 +9,16 @@ use uuid::Uuid;
 use super::repo::Repo;
 
 /// Lightweight primary-repo descriptor for sidebar folder grouping.
+///
+/// `path` is the grouping identity: two checkouts of the same repository share
+/// a name and often a display name, but never a path.
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct PrimaryRepoInfo {
     pub id: Uuid,
     pub name: String,
     pub display_name: String,
+    #[ts(type = "string")]
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, TS)]
@@ -304,7 +309,8 @@ impl WorkspaceRepo {
             r#"SELECT wr.workspace_id as "workspace_id!: Uuid",
                       r.id             as "repo_id!: Uuid",
                       r.name,
-                      r.display_name
+                      r.display_name,
+                      r.path
                FROM workspace_repos wr
                JOIN repos r      ON r.id = wr.repo_id
                JOIN workspaces w ON w.id = wr.workspace_id
@@ -321,6 +327,7 @@ impl WorkspaceRepo {
                 id: row.repo_id,
                 name: row.name,
                 display_name: row.display_name,
+                path: PathBuf::from(row.path),
             });
         }
         Ok(map)

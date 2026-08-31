@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-use workspace_utils::approvals::ApprovalStatus;
+use workspace_utils::approvals::{ApprovalPatterns, ApprovalScope, ApprovalStatus};
 
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
@@ -105,7 +105,24 @@ impl acp::Client for AcpClient {
             .ok_or(ExecutorApprovalError::ServiceUnavailable)
             .map_err(|_| acp::Error::invalid_request())?;
 
-        let approval_id = match approval_service.create_tool_approval(tool_name).await {
+        // ACP names its own session-scoped option. Reporting it as the session
+        // pattern is what stops the UI offering a persistence an agent that
+        // only sent `allow_once` cannot honour.
+        let session_option = args
+            .options
+            .iter()
+            .find(|o| matches!(o.kind, acp::PermissionOptionKind::AllowAlways));
+        let patterns = ApprovalPatterns {
+            request: Vec::new(),
+            session: session_option
+                .map(|o| vec![o.name.clone()])
+                .unwrap_or_default(),
+        };
+
+        let approval_id = match approval_service
+            .create_tool_approval(tool_name, patterns)
+            .await
+        {
             Ok(id) => id,
             Err(err) => return self.handle_approval_error(err, &tool_call_id),
         };
@@ -125,11 +142,16 @@ impl acp::Client for AcpClient {
 
         // Map our ApprovalStatus to ACP outcome
         let outcome = match &status {
-            ApprovalStatus::Approved => {
-                let chosen = args
-                    .options
-                    .iter()
-                    .find(|o| matches!(o.kind, acp::PermissionOptionKind::AllowOnce));
+            ApprovalStatus::Approved { scope } => {
+                let chosen = match scope {
+                    ApprovalScope::Session => session_option,
+                    ApprovalScope::Once => None,
+                }
+                .or_else(|| {
+                    args.options
+                        .iter()
+                        .find(|o| matches!(o.kind, acp::PermissionOptionKind::AllowOnce))
+                });
                 if let Some(opt) = chosen {
                     acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
                         opt.option_id.clone(),

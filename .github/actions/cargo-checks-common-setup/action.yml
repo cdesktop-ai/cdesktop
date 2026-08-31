@@ -20,6 +20,10 @@ inputs:
     description: 'Whether to install sqlx-cli'
     required: false
     default: 'false'
+  sqlx-cli-version:
+    description: 'sqlx-cli version compatible with the workspace SQLx dependency'
+    required: false
+    default: '0.8.6'
 
 runs:
   using: 'composite'
@@ -59,6 +63,6 @@ runs:
       if: ${{ inputs.setup-sqlx-cli == 'true' }}
       uses: taiki-e/cache-cargo-install-action@34ce5120836e5f9f1508d8713d7fdea0e8facd6f # v3.0.1
       with:
-        tool: sqlx-cli
+        tool: sqlx-cli@${{ inputs.sqlx-cli-version }}
         no-default-features: true
         features: sqlite,postgres

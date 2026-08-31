@@ -80,6 +80,10 @@ impl StandardCodingAgentExecutor for QwenCode {
         self.approvals = Some(approvals);
     }
 
+    fn brokers_approvals(&self) -> bool {
+        true
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,

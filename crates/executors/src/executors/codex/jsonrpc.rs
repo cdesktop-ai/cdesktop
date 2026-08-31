@@ -166,7 +166,9 @@ impl JsonRpcPeer {
                 }
             }
 
-            exit_tx.send_exit_signal(ExecutorExitResult::Success).await;
+            exit_tx
+                .send_exit_signal(callbacks.final_exit_result().await)
+                .await;
             let _ = reader_peer.shutdown().await;
         });
 
@@ -303,4 +305,11 @@ pub trait JsonRpcCallbacks: Send + Sync {
     ) -> Result<bool, ExecutorError>;
 
     async fn on_non_json(&self, _raw: &str) -> Result<(), ExecutorError>;
+
+    /// Exit result to report when the read loop finishes. Implementations
+    /// override this to surface a normalized failure observed in the stream
+    /// (e.g. a failed turn with a stable provider error code).
+    async fn final_exit_result(&self) -> ExecutorExitResult {
+        ExecutorExitResult::Success
+    }
 }

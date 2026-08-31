@@ -1,0 +1,9 @@
+{
+  "sessionID": "ses_fd428ddd6ffepUkfIISXL0LOpt",
+  "status": {
+    "type": "retry",
+    "attempt": 1,
+    "message": "Number of request tokens has exceeded your per-minute rate limit.",
+    "next": 1787441959090
+  }
+}

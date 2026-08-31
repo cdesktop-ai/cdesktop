@@ -1,6 +1,6 @@
 [package]
 name = "db"
-version = "0.2.3"
+version = "0.2.6"
 edition = "2024"
 
 [dependencies]
@@ -19,3 +19,7 @@ serde_with = { workspace = true }
 strum = "0.27.2"
 strum_macros = "0.27.2"
 futures = "0.3.32"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

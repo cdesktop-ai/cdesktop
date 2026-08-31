@@ -11,7 +11,7 @@ import {
   WarningIcon,
   type Icon,
 } from '@phosphor-icons/react';
-import type { ExecutorConfig, ModelInfo } from 'shared/types';
+import type { ExecutorConfig, ModelInfo, ReasoningOption } from 'shared/types';
 import { BaseCodingAgent, PermissionPolicy } from 'shared/types';
 import { toPrettyCase } from '@/shared/lib/string';
 import {
@@ -58,6 +58,15 @@ const CLAUDE_PERMISSIONS: PermissionPolicy[] = [
   PermissionPolicy.AUTO_MODE,
   PermissionPolicy.BYPASS_PERMISSIONS,
 ];
+
+const reasoningOptions = (includeMax: boolean): ReasoningOption[] =>
+  [
+    ['low', 'Low'],
+    ['medium', 'Medium'],
+    ['high', 'High'],
+    ['xhigh', 'Extra High'],
+    ...(includeMax ? ([['max', 'Max']] as const) : []),
+  ].map(([id, label]) => ({ id, label, is_default: id === 'high' }));
 
 interface ModelSelectorContainerProps {
   agent: BaseCodingAgent | null;
@@ -152,7 +161,14 @@ export function ModelSelectorContainer({
   }, [streamError]);
 
   const baseConfig = streamConfig;
-  const config = appendPresetModel(baseConfig, presetOptions?.model_id);
+  const presetConfig = appendPresetModel(baseConfig, presetOptions?.model_id);
+  const config = appendPresetModel(
+    presetConfig,
+    executorConfig?.model_id,
+    reasoningOptions(
+      agent === BaseCodingAgent.CLAUDE_CODE || agent === BaseCodingAgent.CODEX
+    )
+  );
 
   const availableProviderIds = useMemo(
     () => config?.providers.map((item) => item.id) ?? [],
@@ -537,6 +553,7 @@ export function ModelSelectorContainer({
         expandedProviderId={expandedProviderId}
         onExpandedProviderIdChange={setExpandedProviderId}
         resolvedTheme={resolvedTheme}
+        allowCustomModelId
       />
     ) : null;
 

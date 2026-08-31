@@ -24,7 +24,6 @@ use services::services::{
     file_search::FileSearchCache,
     filesystem::{FilesystemError, FilesystemService},
     filesystem_watcher::FilesystemWatcherError,
-    queued_message::QueuedMessageService,
     remote_client::RemoteClient,
     repo::RepoService,
 };
@@ -103,8 +102,6 @@ pub trait Deployment: Clone + Send + Sync + 'static {
     fn file_search_cache(&self) -> &Arc<FileSearchCache>;
 
     fn approvals(&self) -> &Approvals;
-
-    fn queued_message_service(&self) -> &QueuedMessageService;
 
     fn auth_context(&self) -> &AuthContext;
 

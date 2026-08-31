@@ -76,7 +76,8 @@
     "emptyDescription": "Your workspace conversation will appear here once a new turn starts.",
     "toolName": {
       "Skill": "Skill"
-    }
+    },
+    "spawnInstructions": "Spawn instructions"
   },
   "changesPanel": {
     "notGitRepo": "Not a Git repo — no diff available"
@@ -668,10 +669,7 @@
       "prFilterLabel": "PR",
       "prFilterAll": "All",
       "prFilterHasPr": "Has PR",
-      "prFilterNoPr": "No PR",
-      "noProject": "No project",
-      "sortButtonTitle": "Sort sessions",
-      "filterButtonTitle": "Filter sessions"
+      "prFilterNoPr": "No PR"
     },
     "sortAscending": "Ascending",
     "sortDescending": "Descending",
@@ -931,6 +929,11 @@
     },
     "sidebar": {
       "nav": "Routines"
+    }
+  },
+  "agents": {
+    "sidebar": {
+      "nav": "Agents"
     }
   }
 }

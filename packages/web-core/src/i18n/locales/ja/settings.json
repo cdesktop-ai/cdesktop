@@ -21,6 +21,8 @@
         "reposDesc": "フォルダスクリプトと設定",
         "agents": "エージェント",
         "agentsDesc": "コーディングエージェントの設定",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "mcp": "MCPサーバー",
         "mcpDesc": "モデルコンテキストプロトコルサーバー",
         "organizations": "Organization Settings",

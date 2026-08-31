@@ -2,12 +2,16 @@ import {
   ExecutionProcess,
   ExecutorAction,
   PatchType,
+  PromptKind,
   Workspace,
 } from 'shared/types';
 
 export type PatchTypeWithKey = PatchType & {
   patchKey: string;
   executionProcessId: string;
+  /** Set on synthesized user-message entries from the marker the backend
+   *  recorded on the executor action. Absent on everything else. */
+  promptKind?: PromptKind;
 };
 
 /**

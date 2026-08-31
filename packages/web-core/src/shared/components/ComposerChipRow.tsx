@@ -1,8 +1,4 @@
-import {
-  FolderIcon,
-  PlusIcon,
-  TrashIcon,
-} from '@phosphor-icons/react';
+import { FolderIcon, PlusIcon, TrashIcon } from '@phosphor-icons/react';
 import { useCallback, useEffect, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';

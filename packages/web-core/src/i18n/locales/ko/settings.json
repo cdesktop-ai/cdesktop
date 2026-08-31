@@ -21,6 +21,8 @@
         "reposDesc": "폴더 스크립트 및 구성",
         "agents": "에이전트",
         "agentsDesc": "코딩 에이전트 구성",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "mcp": "MCP 서버",
         "mcpDesc": "Model Context Protocol 서버",
         "organizations": "Organization Settings",

@@ -21,6 +21,7 @@ import { Route as AppWorkspacesElectricTestRouteImport } from './routes/_app.wor
 import { Route as AppProjectsProjectIdRouteImport } from './routes/_app.projects.$projectId'
 import { Route as AppShellWorkspacesRouteImport } from './routes/_app._shell.workspaces'
 import { Route as AppShellRoutinesRouteImport } from './routes/_app._shell.routines'
+import { Route as AppShellAgentsRouteImport } from './routes/_app._shell.agents'
 import { Route as AppHostsHostIdWorkspacesRouteImport } from './routes/_app.hosts.$hostId.workspaces'
 import { Route as AppShellWorkspacesWorkspaceIdRouteImport } from './routes/_app._shell.workspaces_.$workspaceId'
 import { Route as AppShellRoutinesNewRouteImport } from './routes/_app._shell.routines_.new'
@@ -93,6 +94,11 @@ const AppShellWorkspacesRoute = AppShellWorkspacesRouteImport.update({
 const AppShellRoutinesRoute = AppShellRoutinesRouteImport.update({
   id: '/routines',
   path: '/routines',
+  getParentRoute: () => AppShellRoute,
+} as any)
+const AppShellAgentsRoute = AppShellAgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
   getParentRoute: () => AppShellRoute,
 } as any)
 const AppHostsHostIdWorkspacesRoute =
@@ -183,6 +189,7 @@ export interface FileRoutesByFullPath {
   '/export': typeof AppExportRoute
   '/notifications': typeof AppNotificationsRoute
   '/onboarding/sign-in': typeof OnboardingSignInRoute
+  '/agents': typeof AppShellAgentsRoute
   '/routines': typeof AppShellRoutinesRoute
   '/workspaces': typeof AppShellWorkspacesRoute
   '/projects/$projectId': typeof AppProjectsProjectIdRoute
@@ -208,6 +215,7 @@ export interface FileRoutesByTo {
   '/export': typeof AppExportRoute
   '/notifications': typeof AppNotificationsRoute
   '/onboarding/sign-in': typeof OnboardingSignInRoute
+  '/agents': typeof AppShellAgentsRoute
   '/routines': typeof AppShellRoutinesRoute
   '/workspaces': typeof AppShellWorkspacesRoute
   '/projects/$projectId': typeof AppProjectsProjectIdRoute
@@ -236,6 +244,7 @@ export interface FileRoutesById {
   '/_app/export': typeof AppExportRoute
   '/_app/notifications': typeof AppNotificationsRoute
   '/onboarding_/sign-in': typeof OnboardingSignInRoute
+  '/_app/_shell/agents': typeof AppShellAgentsRoute
   '/_app/_shell/routines': typeof AppShellRoutinesRoute
   '/_app/_shell/workspaces': typeof AppShellWorkspacesRoute
   '/_app/projects/$projectId': typeof AppProjectsProjectIdRoute
@@ -263,6 +272,7 @@ export interface FileRouteTypes {
     | '/export'
     | '/notifications'
     | '/onboarding/sign-in'
+    | '/agents'
     | '/routines'
     | '/workspaces'
     | '/projects/$projectId'
@@ -288,6 +298,7 @@ export interface FileRouteTypes {
     | '/export'
     | '/notifications'
     | '/onboarding/sign-in'
+    | '/agents'
     | '/routines'
     | '/workspaces'
     | '/projects/$projectId'
@@ -315,6 +326,7 @@ export interface FileRouteTypes {
     | '/_app/export'
     | '/_app/notifications'
     | '/onboarding_/sign-in'
+    | '/_app/_shell/agents'
     | '/_app/_shell/routines'
     | '/_app/_shell/workspaces'
     | '/_app/projects/$projectId'
@@ -430,6 +442,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppShellRoutinesRouteImport
       parentRoute: typeof AppShellRoute
     }
+    '/_app/_shell/agents': {
+      id: '/_app/_shell/agents'
+      path: '/agents'
+      fullPath: '/agents'
+      preLoaderRoute: typeof AppShellAgentsRouteImport
+      parentRoute: typeof AppShellRoute
+    }
     '/_app/hosts/$hostId/workspaces': {
       id: '/_app/hosts/$hostId/workspaces'
       path: '/hosts/$hostId/workspaces'
@@ -525,6 +544,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppShellRouteChildren {
+  AppShellAgentsRoute: typeof AppShellAgentsRoute
   AppShellRoutinesRoute: typeof AppShellRoutinesRoute
   AppShellWorkspacesRoute: typeof AppShellWorkspacesRoute
   AppShellRoutinesRoutineIdRoute: typeof AppShellRoutinesRoutineIdRoute
@@ -533,6 +553,7 @@ interface AppShellRouteChildren {
 }
 
 const AppShellRouteChildren: AppShellRouteChildren = {
+  AppShellAgentsRoute: AppShellAgentsRoute,
   AppShellRoutinesRoute: AppShellRoutinesRoute,
   AppShellWorkspacesRoute: AppShellWorkspacesRoute,
   AppShellRoutinesRoutineIdRoute: AppShellRoutinesRoutineIdRoute,

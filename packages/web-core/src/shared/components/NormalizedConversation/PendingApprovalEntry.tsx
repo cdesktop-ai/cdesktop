@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react';
 import type { ReactNode } from 'react';
-import type { ApprovalStatus, ToolStatus } from 'shared/types';
+import type { ApprovalScope, ApprovalStatus, ToolStatus } from 'shared/types';
 import { Button } from '@vibe/ui/components/Button';
 import {
   Tooltip,
@@ -16,7 +16,7 @@ import {
   TooltipTrigger,
 } from '@vibe/ui/components/RadixTooltip';
 import { approvalsApi } from '@/shared/lib/api';
-import { Check, X } from 'lucide-react';
+import { Check, CheckCheck, X } from 'lucide-react';
 import WYSIWYGEditor from '@/shared/components/WYSIWYGEditor';
 
 import { useHotkeysContext } from 'react-hotkeys-hook';
@@ -79,12 +79,17 @@ function useApprovalCountdown(
 function ActionButtons({
   disabled,
   isResponding,
+  sessionScope,
   onApprove,
+  onApproveForSession,
   onStartDeny,
 }: {
   disabled: boolean;
   isResponding: boolean;
+  /** Non-empty only when the agent offers a session-scoped grant. */
+  sessionScope: string[];
   onApprove: () => void;
+  onApproveForSession: () => void;
   onStartDeny: () => void;
 }) {
   return (
@@ -106,6 +111,37 @@ function ActionButtons({
           <p>{isResponding ? 'Submitting…' : 'Approve request'}</p>
         </TooltipContent>
       </Tooltip>
+
+      {sessionScope.length > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              onClick={onApproveForSession}
+              variant="ghost"
+              className="h-8 w-8 rounded-full p-0"
+              disabled={disabled}
+              aria-label={
+                isResponding
+                  ? 'Submitting approval'
+                  : 'Approve and allow for the rest of this session'
+              }
+              aria-busy={isResponding}
+            >
+              <CheckCheck className="h-5 w-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <p>Approve, and stop asking for:</p>
+            <ul className="mt-1 space-y-0.5">
+              {sessionScope.map((pattern) => (
+                <li key={pattern} className="font-mono text-xs">
+                  {pattern}
+                </li>
+              ))}
+            </ul>
+          </TooltipContent>
+        </Tooltip>
+      )}
 
       <Tooltip>
         <TooltipTrigger asChild>
@@ -208,6 +244,9 @@ const PendingApprovalEntry = ({
   );
 
   const disabled = isResponding || hasResponded || timeLeft <= 0;
+  // Empty unless the agent named a rule it would remember. Offering the action
+  // without one would promise a persistence the agent never agreed to.
+  const sessionScope = approvalInfo?.patterns.session ?? [];
 
   const shouldEnableApprovalsScope = shouldControlScopes && !disabled;
 
@@ -243,7 +282,11 @@ const PendingApprovalEntry = ({
   ]);
 
   const respond = useCallback(
-    async (approved: boolean, reason?: string) => {
+    async (
+      approved: boolean,
+      reason?: string,
+      scope: ApprovalScope = 'once'
+    ) => {
       if (disabled) return;
       if (!executionProcessId) {
         setError('Missing executionProcessId');
@@ -254,7 +297,7 @@ const PendingApprovalEntry = ({
       setError(null);
 
       const status: ApprovalStatus = approved
-        ? { status: 'approved' }
+        ? { status: 'approved', scope }
         : { status: 'denied', reason };
 
       try {
@@ -277,6 +320,10 @@ const PendingApprovalEntry = ({
   );
 
   const handleApprove = useCallback(() => respond(true), [respond]);
+  const handleApproveForSession = useCallback(
+    () => respond(true, undefined, 'session'),
+    [respond]
+  );
   const handleStartDeny = useCallback(() => {
     if (disabled) return;
     setError(null);
@@ -334,7 +381,9 @@ const PendingApprovalEntry = ({
                 <ActionButtons
                   disabled={disabled}
                   isResponding={isResponding}
+                  sessionScope={sessionScope}
                   onApprove={handleApprove}
+                  onApproveForSession={handleApproveForSession}
                   onStartDeny={handleStartDeny}
                 />
               )}

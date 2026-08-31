@@ -12,6 +12,8 @@ import {
   DirectoryListResponse,
   DirectoryEntry,
   ExecutionProcess,
+  ExecutionProcessOutcome,
+  ExecutionRoutingSettings,
   ExecutionProcessRepoState,
   GitBranch,
   Repo,
@@ -68,6 +70,7 @@ import {
   TokenResponse,
   CurrentUserResponse,
   QueueStatus,
+  SessionCommand,
   PrCommentsResponse,
   MergeWorkspaceRequest,
   PushWorkspaceRequest,
@@ -108,6 +111,10 @@ import {
   UpdateRoutine,
   RunNowResponse,
 } from 'shared/types';
+import type {
+  MeteredApproval,
+  MeteredApprovalResponseRequest,
+} from './execution-routing/apiTypes';
 import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { createWorkspaceWithSession } from '@/shared/types/attempt';
@@ -350,12 +357,12 @@ export const sessionsApi = {
   followUp: async (
     sessionId: string,
     data: CreateFollowUpAttempt
-  ): Promise<ExecutionProcess> => {
+  ): Promise<SessionCommand> => {
     const response = await makeRequest(`/api/sessions/${sessionId}/follow-up`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
-    return handleApiResponse<ExecutionProcess>(response);
+    return handleApiResponse<SessionCommand>(response);
   },
 
   startReview: async (
@@ -821,8 +828,25 @@ export const workspacesApi = {
   },
 };
 
+// Execution Routing APIs
+export const executionRoutingApi = {
+  // `null` means sightmesh has not configured routing on this host; the
+  // dashboard falls back to fixtures only in that case.
+  getSettings: async (): Promise<ExecutionRoutingSettings | null> => {
+    const response = await makeRequest('/api/execution-routing/settings');
+    return handleApiResponse<ExecutionRoutingSettings | null>(response);
+  },
+};
+
 // Execution Process APIs
 export const executionProcessesApi = {
+  listOutcomes: async (
+    sessionId: string
+  ): Promise<ExecutionProcessOutcome[]> => {
+    const response = await makeRequest(`/api/sessions/${sessionId}/outcomes`);
+    return handleApiResponse<ExecutionProcessOutcome[]>(response);
+  },
+
   getDetails: async (processId: string): Promise<ExecutionProcess> => {
     const response = await makeRequest(`/api/execution-processes/${processId}`);
     return handleApiResponse<ExecutionProcess>(response);
@@ -1273,6 +1297,30 @@ export const approvalsApi = {
   },
 };
 
+// Durable metered-fallback approvals. Keep this separate from tool approvals:
+// the server persists these rows and resolves each decision exactly once.
+export const meteredApprovalsApi = {
+  listPending: async (): Promise<MeteredApproval[]> => {
+    const response = await makeRequest('/api/metered-approvals');
+    return handleApiResponse<MeteredApproval[]>(response);
+  },
+
+  respond: async (
+    approvalId: string,
+    payload: MeteredApprovalResponseRequest
+  ): Promise<MeteredApproval> => {
+    const response = await makeRequest(
+      `/api/metered-approvals/${approvalId}/respond`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    return handleApiResponse<MeteredApproval>(response);
+  },
+};
+
 // OAuth API
 export type AuthMethodsResponse = {
   local_auth_enabled: boolean;
@@ -1624,6 +1672,21 @@ export const queueApi = {
   getStatus: async (sessionId: string): Promise<QueueStatus> => {
     const response = await makeRequest(`/api/sessions/${sessionId}/queue`);
     return handleApiResponse<QueueStatus>(response);
+  },
+};
+
+export interface SightMeshUpdateStatus {
+  managed: boolean;
+  status: string;
+  pending_version: string | null;
+  active_version: string | null;
+  updated_at: number | null;
+}
+
+export const maintenanceApi = {
+  getUpdateStatus: async (): Promise<SightMeshUpdateStatus> => {
+    const response = await makeRequest('/api/maintenance/update');
+    return handleApiResponse<SightMeshUpdateStatus>(response);
   },
 };
 

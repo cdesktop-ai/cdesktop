@@ -14,9 +14,28 @@ use crate::{
     profile::ExecutorConfig,
 };
 
+/// What the initial prompt *is*, decided by whoever built the request.
+///
+/// The marker is persisted with the action, so the transcript never has to
+/// infer a prompt's provenance from its text. Requests written before this
+/// field existed deserialize as `User`, which renders exactly as before.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    /// A prompt a human typed into the composer.
+    #[default]
+    User,
+    /// Bootstrap instructions handed to a teammate at spawn time.
+    Spawn,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct CodingAgentInitialRequest {
     pub prompt: String,
+    /// Provenance of `prompt`. Defaults to `User` for back-compat with
+    /// actions persisted before the marker existed.
+    #[serde(default)]
+    pub prompt_kind: PromptKind,
     /// Unified executor identity + overrides
     #[serde(alias = "executor_profile_id", alias = "profile_variant_label")]
     pub executor_config: ExecutorConfig,
@@ -71,5 +90,40 @@ impl Executable for CodingAgentInitialRequest {
 
             agent.spawn(&effective_dir, &self.prompt, env).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Actions persisted before the marker existed must keep rendering as
+    /// ordinary user prompts.
+    #[test]
+    fn legacy_request_without_marker_deserializes_as_user_prompt() {
+        let legacy = serde_json::json!({
+            "prompt": "ship it",
+            "executor_config": { "executor": "CLAUDE_CODE" },
+        });
+
+        let request: CodingAgentInitialRequest = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(request.prompt_kind, PromptKind::User);
+    }
+
+    #[test]
+    fn marker_round_trips_through_persisted_json() {
+        let request = CodingAgentInitialRequest {
+            prompt: "bootstrap".to_string(),
+            prompt_kind: PromptKind::Spawn,
+            executor_config: ExecutorConfig::new(BaseCodingAgent::ClaudeCode),
+            working_dir: None,
+        };
+
+        let persisted = serde_json::to_value(&request).unwrap();
+        assert_eq!(persisted["prompt_kind"], "spawn");
+
+        let restored: CodingAgentInitialRequest = serde_json::from_value(persisted).unwrap();
+        assert_eq!(restored.prompt_kind, PromptKind::Spawn);
     }
 }

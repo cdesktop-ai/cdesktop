@@ -515,7 +515,6 @@
       "errorExecutorRequiresProvider": "다른 실행기로 생성하려면 공급자 + 모델이 필요합니다. CLI `cdesktop team spawn`을 사용하세요.",
       "errorNameInvalid": "이름이 비어 있거나, 너무 길거나, 줄바꿈을 포함합니다.",
       "errorWorkspaceArchived": "보관된 워크스페이스에서는 팀원을 생성할 수 없습니다.",
-      "errorNotLead": "CLI에서 팀원을 생성할 수 있는 것은 리드 세션뿐입니다.",
       "successToast": "팀원 '{{name}}' 생성됨",
       "renameAction": "이름 변경",
       "deleteAction": "삭제",

@@ -19,6 +19,7 @@ use crate::{
     logs::utils::patch,
     model_selector::{ModelSelectorConfig, PermissionPolicy},
     profile::ExecutorConfig,
+    provider::{ProviderContext, ProviderInjection, ProviderInjectionError},
 };
 
 /// Stderr substrings the Hermes ACP adapter emits at INFO level that aren't
@@ -175,6 +176,54 @@ impl StandardCodingAgentExecutor for Hermes {
 
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
+    }
+
+    fn brokers_approvals(&self) -> bool {
+        true
+    }
+
+    fn provider_slot(&self) -> &'static str {
+        "hermes"
+    }
+
+    /// `hermes acp` takes no CLI flags; provider selection happens through env
+    /// read at startup by `hermes_cli/runtime_provider.py`. Force the carrier
+    /// with `HERMES_INFERENCE_PROVIDER=<slug>` (resolution at `:311`), then
+    /// override that carrier's hardcoded base URL with `<SLUG>_BASE_URL` (e.g.
+    /// `OPENROUTER_BASE_URL` at `:577`, whose env fallback short-circuits the
+    /// constant). The auth var follows the carrier's own convention.
+    ///
+    /// `apiMode` picks the carrier: `anthropic_messages` -> anthropic,
+    /// `codex_responses` -> xai, and `chat_completions` (the default, and any
+    /// unrecognised mode) -> openrouter, the most common chat-completions
+    /// carrier.
+    ///
+    /// `HERMES_INFERENCE_MODEL` is read by the oneshot/TUI paths
+    /// (`hermes_cli/oneshot.py:228`) but not by `acp_adapter/`, which applies
+    /// model selection via `set_session_model` (`acp_adapter/server.py:1651`).
+    /// It is set anyway so the same injection stays correct if a future
+    /// profile invokes Hermes off the ACP path.
+    fn build_provider_injection(
+        &self,
+        ctx: &ProviderContext,
+    ) -> Result<ProviderInjection, ProviderInjectionError> {
+        let api_key = ctx.require_api_key(BaseCodingAgent::Hermes)?;
+        let base_url = ctx.require_base_url(BaseCodingAgent::Hermes)?;
+
+        let (slug, url_env, key_env) = match ctx.payload.extra_str("apiMode") {
+            Some("anthropic_messages") => ("anthropic", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"),
+            Some("codex_responses") => ("xai", "XAI_BASE_URL", "XAI_API_KEY"),
+            _ => ("openrouter", "OPENROUTER_BASE_URL", "OPENROUTER_API_KEY"),
+        };
+
+        let mut env = ctx.payload.env.clone();
+        env.insert("HERMES_INFERENCE_PROVIDER".to_string(), slug.to_string());
+        env.insert(url_env.to_string(), base_url.to_string());
+        env.insert(key_env.to_string(), api_key.to_string());
+        if !ctx.model_id.is_empty() {
+            env.insert("HERMES_INFERENCE_MODEL".to_string(), ctx.model_id.clone());
+        }
+        Ok(ProviderInjection::from_env(env))
     }
 
     async fn spawn(

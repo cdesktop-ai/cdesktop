@@ -21,6 +21,8 @@
         "reposDesc": "文件夹脚本和配置",
         "agents": "智能体",
         "agentsDesc": "编码智能体配置",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "mcp": "MCP 服务器",
         "mcpDesc": "模型上下文协议服务器",
         "organizations": "组织设置",

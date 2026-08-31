@@ -515,7 +515,6 @@
       "errorExecutorRequiresProvider": "跨執行器建立需要提供者 + 模型。請使用 CLI `cdesktop team spawn`。",
       "errorNameInvalid": "名稱為空、過長或包含換行符號。",
       "errorWorkspaceArchived": "無法在已封存的工作區中建立隊友。",
-      "errorNotLead": "只有主要工作階段才能從 CLI 建立隊友。",
       "successToast": "已建立隊友「{{name}}」",
       "renameAction": "重新命名",
       "deleteAction": "刪除",

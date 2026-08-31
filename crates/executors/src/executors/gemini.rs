@@ -20,6 +20,7 @@ use crate::{
     logs::utils::patch,
     model_selector::{ModelInfo, ModelSelectorConfig, PermissionPolicy},
     profile::ExecutorConfig,
+    provider::{ProviderContext, ProviderInjection, ProviderInjectionError},
 };
 
 const SUPPRESSED_STDERR_PATTERNS: &[&str] = &[
@@ -99,6 +100,39 @@ impl StandardCodingAgentExecutor for Gemini {
 
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
+    }
+
+    fn brokers_approvals(&self) -> bool {
+        true
+    }
+
+    fn provider_slot(&self) -> &'static str {
+        "gemini"
+    }
+
+    /// gemini-cli reads provider config from env only. `GOOGLE_GEMINI_BASE_URL`
+    /// and `GEMINI_API_KEY` are set after the slot's own `env` so a
+    /// vendor-quirk entry cannot shadow the endpoint or the credential.
+    ///
+    /// `GOOGLE_API_KEY` (gemini-cli's alternate credential var,
+    /// `contentGenerator.ts:156`) is neither set nor cleared:
+    /// `getAuthTypeFromEnv` (`:76-93`) prefers `GEMINI_API_KEY`, so ours wins
+    /// and an ambient `GOOGLE_API_KEY` passes through untouched.
+    ///
+    /// The catalog ships no Gemini presets — ambient auth covers official
+    /// Google routing — so this applier exists for Custom records pointing at
+    /// user-supplied Google-API-compatible endpoints.
+    fn build_provider_injection(
+        &self,
+        ctx: &ProviderContext,
+    ) -> Result<ProviderInjection, ProviderInjectionError> {
+        let api_key = ctx.require_api_key(BaseCodingAgent::Gemini)?;
+        let base_url = ctx.require_base_url(BaseCodingAgent::Gemini)?;
+
+        let mut env = ctx.payload.env.clone();
+        env.insert("GOOGLE_GEMINI_BASE_URL".to_string(), base_url.to_string());
+        env.insert("GEMINI_API_KEY".to_string(), api_key.to_string());
+        Ok(ProviderInjection::from_env(env))
     }
 
     async fn spawn(

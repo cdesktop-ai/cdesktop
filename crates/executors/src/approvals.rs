@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use workspace_utils::approvals::{ApprovalStatus, QuestionStatus};
+use workspace_utils::approvals::{ApprovalPatterns, ApprovalScope, ApprovalStatus, QuestionStatus};
 
 /// Errors emitted by executor approval services.
 #[derive(Debug, Error)]
@@ -29,7 +29,15 @@ impl ExecutorApprovalError {
 #[async_trait]
 pub trait ExecutorApprovalService: Send + Sync {
     /// Creates a tool approval request. Returns the approval_id immediately.
-    async fn create_tool_approval(&self, tool_name: &str) -> Result<String, ExecutorApprovalError>;
+    ///
+    /// `patterns` is the harness's own account of what is being allowed,
+    /// verbatim. Leaving [`ApprovalPatterns::session`] empty is how an adapter
+    /// says it has no session-scoped form for this request.
+    async fn create_tool_approval(
+        &self,
+        tool_name: &str,
+        patterns: ApprovalPatterns,
+    ) -> Result<String, ExecutorApprovalError>;
 
     /// Creates a question approval request. Returns the approval_id immediately.
     async fn create_question_approval(
@@ -61,6 +69,7 @@ impl ExecutorApprovalService for NoopExecutorApprovalService {
     async fn create_tool_approval(
         &self,
         _tool_name: &str,
+        _patterns: ApprovalPatterns,
     ) -> Result<String, ExecutorApprovalError> {
         Ok("noop".to_string())
     }
@@ -78,7 +87,9 @@ impl ExecutorApprovalService for NoopExecutorApprovalService {
         _approval_id: &str,
         _cancel: CancellationToken,
     ) -> Result<ApprovalStatus, ExecutorApprovalError> {
-        Ok(ApprovalStatus::Approved)
+        Ok(ApprovalStatus::Approved {
+            scope: ApprovalScope::Once,
+        })
     }
 
     async fn wait_question_answer(

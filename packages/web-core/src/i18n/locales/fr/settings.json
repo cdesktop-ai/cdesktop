@@ -21,6 +21,8 @@
         "reposDesc": "Scripts et configuration des dossiers",
         "agents": "Agents",
         "agentsDesc": "Configurations des agents de codage",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "mcp": "Serveurs MCP",
         "mcpDesc": "Serveurs Model Context Protocol",
         "organizations": "Paramètres de l'organisation",

@@ -19,6 +19,7 @@ use crate::{
     logs::utils::patch,
     model_selector::{ModelInfo, ModelSelectorConfig, PermissionPolicy},
     profile::ExecutorConfig,
+    provider::{ProviderContext, ProviderInjection, ProviderInjectionError},
 };
 
 /// Stderr lines DeepSeek TUI emits in verbose mode that aren't actionable
@@ -171,6 +172,41 @@ impl StandardCodingAgentExecutor for DeepseekTui {
 
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
+    }
+
+    fn brokers_approvals(&self) -> bool {
+        true
+    }
+
+    fn provider_slot(&self) -> &'static str {
+        "deepseekTui"
+    }
+
+    /// The `deepseek-tui` runtime reads provider, credentials and model from
+    /// env only — the `--provider` / `--base-url` / `--api-key` / `--model`
+    /// flags live on the `deepseek` dispatcher, which forwards them as env
+    /// vars anyway.
+    ///
+    /// Every cdesktop preset routes through the runtime's `openai` provider
+    /// mode, and in that mode it reads exclusively the `openai` slots
+    /// (`crates/secrets/src/lib.rs:460-487` maps `"openai" => &["OPENAI_API_KEY"]`),
+    /// so `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` are not consulted and not
+    /// set. Credential and endpoint go in after the slot's own `env`.
+    fn build_provider_injection(
+        &self,
+        ctx: &ProviderContext,
+    ) -> Result<ProviderInjection, ProviderInjectionError> {
+        let api_key = ctx.require_api_key(BaseCodingAgent::DeepseekTui)?;
+        let base_url = ctx.require_base_url(BaseCodingAgent::DeepseekTui)?;
+
+        let mut env = ctx.payload.env.clone();
+        env.insert("DEEPSEEK_PROVIDER".to_string(), "openai".to_string());
+        env.insert("OPENAI_BASE_URL".to_string(), base_url.to_string());
+        env.insert("OPENAI_API_KEY".to_string(), api_key.to_string());
+        if !ctx.model_id.is_empty() {
+            env.insert("OPENAI_MODEL".to_string(), ctx.model_id.clone());
+        }
+        Ok(ProviderInjection::from_env(env))
     }
 
     async fn spawn(

@@ -4,7 +4,7 @@ import {
   useDraggingWorkspaceId,
 } from '@/shared/stores/usePillDragStore';
 import { useSessionGridStore } from '@/shared/stores/useSessionGridStore';
-import { useLocation, useNavigate, useParams } from '@tanstack/react-router';
+import { useLocation, useParams } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { workspacesApi } from '@/shared/lib/api';
 import { workspaceSummaryKeys } from '@/shared/hooks/workspaceSummaryKeys';
@@ -12,6 +12,7 @@ import { workspaceRecordKeys } from '@/shared/hooks/useWorkspaceRecord';
 import { useTranslation } from 'react-i18next';
 import { ThemeMode } from 'shared/types';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
+import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useUserContext } from '@/shared/hooks/useUserContext';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { useScratch } from '@/shared/hooks/useScratch';
@@ -19,6 +20,7 @@ import { useFolderSeedStore } from '@/shared/stores/useFolderSeedStore';
 import { useTheme } from '@/shared/hooks/useTheme';
 import { ScratchType, type DraftWorkspaceData } from 'shared/types';
 import { splitMessageToTitleDescription } from '@/shared/lib/string';
+import { repoGroupQualifiers } from '@/shared/lib/repoGroupLabels';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
 import {
   PERSIST_KEYS,
@@ -329,9 +331,10 @@ export function WorkspacesSidebarContainer({
   const isMobile = useIsMobile();
   const { hosts: remoteCloudHosts } = useRemoteCloudHostsAppBarModel();
   const { hostId: routeHostId } = useParams({ strict: false });
-  const routerNavigate = useNavigate();
+  const appNavigation = useAppNavigation();
   const location = useLocation();
   const isRoutinesActive = location.pathname.startsWith('/routines');
+  const isAgentsActive = location.pathname.startsWith('/agents');
   const setMobileActiveTab = useUiPreferencesStore((s) => s.setMobileActiveTab);
   const searchQuery = useUiPreferencesStore((s) => s.sidebarSearchQuery);
   const [showArchive, setShowArchive] = usePersistedExpanded(
@@ -560,20 +563,35 @@ export function WorkspacesSidebarContainer({
         );
         continue;
       }
-      const existing = groups.get(primary.id);
+      // Key by path: two local checkouts of one repository differ by path and
+      // by nothing else the sidebar shows.
+      const existing = groups.get(primary.path);
       if (existing) {
         existing.sessions.push(ws);
       } else {
-        groups.set(primary.id, {
+        groups.set(primary.path, {
           repoId: primary.id,
+          repoPath: primary.path,
           displayName: primary.displayName || primary.name,
           sessions: [ws],
         });
       }
     }
 
-    const folderGroupsArr = Array.from(groups.values()).sort((a, b) =>
-      a.displayName.localeCompare(b.displayName)
+    const qualifiers = repoGroupQualifiers(
+      Array.from(groups.values(), (group) => ({
+        path: group.repoPath,
+        label: group.displayName,
+      }))
+    );
+
+    const folderGroupsArr = Array.from(groups.values(), (group) => ({
+      ...group,
+      qualifier: qualifiers.get(group.repoPath),
+    })).sort(
+      (a, b) =>
+        a.displayName.localeCompare(b.displayName) ||
+        (a.qualifier ?? '').localeCompare(b.qualifier ?? '')
     );
     return { pinnedWorkspaces: pinned, folderGroups: folderGroupsArr };
   }, [paginatedActiveWorkspaces]);
@@ -653,14 +671,18 @@ export function WorkspacesSidebarContainer({
   }, [navigateToCreate, isMobile, setMobileActiveTab]);
 
   const handleOpenRoutines = useCallback(() => {
-    // web-core is shared between local-web and remote-web; remote-web's
-    // routeTree doesn't include /routines, so we widen `to` to break the
-    // typed-router strict check. Local-web ignores this on its own routeTree.
-    routerNavigate({ to: '/routines' as unknown as '/' });
+    appNavigation.routines?.goToRoutines();
     if (isMobile) {
       setMobileActiveTab('chat');
     }
-  }, [routerNavigate, isMobile, setMobileActiveTab]);
+  }, [appNavigation, isMobile, setMobileActiveTab]);
+
+  const handleOpenAgents = useCallback(() => {
+    appNavigation.goToAgents();
+    if (isMobile) {
+      setMobileActiveTab('chat');
+    }
+  }, [appNavigation, isMobile, setMobileActiveTab]);
 
   const setPendingFolderSeed = useFolderSeedStore((s) => s.setPending);
   const handleCreateInFolder = useCallback(
@@ -777,7 +799,7 @@ export function WorkspacesSidebarContainer({
   // When the anchor cell is hosting a slot (create-mode composer or routines
   // pages) instead of its workspace, exclude the anchor cell's workspace from
   // the active/focused pill sets — the workspace isn't on screen.
-  const anchorSlotActive = isCreateMode || isRoutinesActive;
+  const anchorSlotActive = isCreateMode || isRoutinesActive || isAgentsActive;
   const openInGridWorkspaceIds = useMemo(() => {
     const anchorId = grid.groups[0]?.cells[0]?.id;
     return new Set(
@@ -913,8 +935,10 @@ export function WorkspacesSidebarContainer({
         onSelectWorkspace={handleSelectWorkspace}
         onAddWorkspace={handleAddWorkspace}
         onCreateInFolder={handleCreateInFolder}
-        onOpenRoutines={handleOpenRoutines}
+        onOpenRoutines={appNavigation.routines ? handleOpenRoutines : undefined}
         isRoutinesActive={isRoutinesActive}
+        onOpenAgents={handleOpenAgents}
+        isAgentsActive={isAgentsActive}
         isCreateMode={isCreateMode}
         draftTitle={persistedDraftTitle}
         onSelectCreate={navigateToCreate}

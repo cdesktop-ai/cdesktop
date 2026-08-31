@@ -15,6 +15,8 @@ export interface SidebarPrimaryRepo {
   id: string;
   name: string;
   displayName: string;
+  /** Grouping identity: two checkouts of one repository never share a path. */
+  path: string;
 }
 
 // UI-specific workspace type for sidebar display
@@ -96,6 +98,7 @@ function toSidebarWorkspace(
           id: summary.primary_repo.id,
           name: summary.primary_repo.name,
           displayName: summary.primary_repo.display_name,
+          path: summary.primary_repo.path,
         }
       : undefined,
   };

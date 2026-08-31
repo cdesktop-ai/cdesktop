@@ -42,3 +42,17 @@ This is useful for:
 - Project-specific Codex profiles
 - Separating work and personal configurations
 - Custom automation setups
+
+## Approvals and the sandbox
+
+Codex decides for itself when an action is worth interrupting for, and that decision is made by its sandbox rather than by the approval setting alone. Both are sent together when a session starts, and both are derived from the permission policy you pick for the agent.
+
+The consequence worth knowing before you rely on approvals with Codex:
+
+- **Bypass permissions** turns approvals off entirely. Codex raises no approval request, so nothing reaches the approval UI.
+- **Supervised**, **Accept edits** and **Auto** all resolve to the same Codex approval policy. Picking between them does not change what Codex asks about.
+- A wider sandbox means fewer prompts. Actions the sandbox already permits are not raised for approval at all.
+
+When Codex does ask, the approval behaves like any other: approve, approve for the rest of the session, or deny with a reason. Approving for the session uses Codex's own session approval cache, which for file changes covers the same files rather than all files.
+
+Other agents differ here. OpenCode reports the exact rule a session approval would install, and Claude Code offers a session approval only when its CLI names a rule to persist. See `docs/design/harness-approvals.md` for the full comparison.

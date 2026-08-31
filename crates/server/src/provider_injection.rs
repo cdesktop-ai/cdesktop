@@ -1,26 +1,26 @@
-use db::models::provider::{AgentInjection, Provider};
-use executors::profile::ExecutorConfig;
+use db::models::provider::Provider;
+use executors::{profile::ExecutorConfig, provider::ProviderInjection};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 
-/// Build the spawn-time provider injection (env vars + Codex overrides) for
-/// a selected provider id. Mirrors what `workspaces::create::create_and_start_workspace`
-/// builds before calling `start_workspace`; shared so the routine spawn path
-/// behaves identically.
+/// Build the spawn-time provider injection for a selected provider id.
+/// Mirrors what `workspaces::create::create_and_start_workspace` builds before
+/// calling `start_workspace`; shared so the routine spawn path behaves
+/// identically.
 ///
-/// Mutates `executor_config.model_id` to apply the provider's opencode prefix
-/// when applicable (no-op for non-opencode agents).
+/// Mutates `executor_config.model_id` to the id form the target harness
+/// addresses models by.
 ///
 /// Returns the default (empty) injection when no provider id is supplied.
 pub async fn build_injection_for_provider(
     pool: &SqlitePool,
     selected_provider_id: Option<Uuid>,
     executor_config: &mut ExecutorConfig,
-) -> Result<AgentInjection, ApiError> {
+) -> Result<ProviderInjection, ApiError> {
     let Some(provider_id) = selected_provider_id else {
-        return Ok(AgentInjection::default());
+        return Ok(ProviderInjection::default());
     };
 
     let provider = Provider::find_by_id(pool, provider_id)
@@ -32,12 +32,14 @@ pub async fn build_injection_for_provider(
             provider.name
         )));
     }
-    if let Some(m) = executor_config.model_id.as_deref() {
-        executor_config.model_id =
-            Some(provider.prefix_opencode_model_id(executor_config.executor, m));
+    let (model_id, injection) = provider
+        .resolve_injection(
+            executor_config.executor,
+            executor_config.model_id.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if executor_config.model_id.is_some() {
+        executor_config.model_id = Some(model_id);
     }
-    let model_id = executor_config.model_id.as_deref().unwrap_or("");
-    provider
-        .build_agent_injection(executor_config.executor, model_id)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))
+    Ok(injection)
 }

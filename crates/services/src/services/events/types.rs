@@ -41,7 +41,7 @@ pub enum HookTables {
 pub enum RecordTypes {
     Workspace(Workspace),
     ExecutionProcess(ExecutionProcess),
-    Scratch(Scratch),
+    Scratch(Box<Scratch>),
     Session(Session),
     Routine(Routine),
     RoutineRun(RoutineRun),

@@ -365,6 +365,51 @@ impl Workspace {
         .await
     }
 
+    /// Workspaces eligible for automatic archiving: idle beyond `idle_days`
+    /// with nothing running and no pin holding them open.
+    ///
+    /// Idleness is measured from the later of the workspace's own
+    /// `updated_at` and its most recent completed execution. A workspace that
+    /// never ran anything still has `updated_at`, so it cannot hide from the
+    /// sweep behind an empty execution history.
+    pub async fn find_idle_for_auto_archive(
+        pool: &SqlitePool,
+        idle_days: u32,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        let cutoff = format!("-{idle_days} days");
+        sqlx::query_scalar!(
+            r#"
+            SELECT w.id AS "id!: Uuid"
+            FROM workspaces w
+            WHERE w.archived = FALSE
+              AND w.pin_order IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM sessions s
+                  JOIN execution_processes ep ON ep.session_id = s.id
+                  WHERE s.workspace_id = w.id
+                    AND ep.completed_at IS NULL
+              )
+              AND datetime('now', $1) > (
+                  SELECT MAX(activity)
+                  FROM (
+                      SELECT datetime(w.updated_at) AS activity
+                      UNION ALL
+                      SELECT datetime(ep.completed_at)
+                      FROM sessions s
+                      JOIN execution_processes ep ON ep.session_id = s.id
+                      WHERE s.workspace_id = w.id
+                        AND ep.completed_at IS NOT NULL
+                  )
+              )
+            ORDER BY w.updated_at ASC
+            "#,
+            cutoff
+        )
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn create(
         pool: &SqlitePool,
         data: &CreateWorkspace,
@@ -835,9 +880,131 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
     use uuid::Uuid;
 
     use super::Workspace;
+
+    async fn migrated_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    /// Insert a workspace whose last own activity was `age_days` ago.
+    async fn workspace_idle_for(pool: &SqlitePool, age_days: i64, pinned: bool) -> Uuid {
+        let id = Uuid::new_v4();
+        let pin_order = pinned.then_some(0i64);
+        sqlx::query(
+            "INSERT INTO workspaces (id, branch, name, updated_at, pin_order)
+             VALUES (?, 'main', 'ws', datetime('now', ?), ?)",
+        )
+        .bind(id)
+        .bind(format!("-{age_days} days"))
+        .bind(pin_order)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Attach one execution process. `completed_days_ago` of `None` leaves it
+    /// in flight, which is the state a workspace awaiting approval is in.
+    async fn add_execution(pool: &SqlitePool, workspace_id: Uuid, completed_days_ago: Option<i64>) {
+        let session_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO sessions (id, workspace_id) VALUES (?, ?)")
+            .bind(session_id)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let (status, completed_offset) = match completed_days_ago {
+            Some(days) => ("completed", Some(format!("-{days} days"))),
+            None => ("running", None),
+        };
+        // Number every placeholder: mixing `?` with `?3` renumbers the
+        // anonymous ones and silently binds the wrong column.
+        sqlx::query(
+            "INSERT INTO execution_processes (id, session_id, status, completed_at)
+             VALUES (?1, ?2, ?3, CASE WHEN ?4 IS NULL THEN NULL ELSE datetime('now', ?4) END)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(session_id)
+        .bind(status)
+        .bind(completed_offset)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_archive_retires_only_idle_unpinned_finished_workspaces() {
+        let pool = migrated_pool().await;
+
+        // Idle for 30 days with no execution history at all. 400+ workspaces
+        // accumulated this way over a week of fleet use.
+        let never_ran = workspace_idle_for(&pool, 30, false).await;
+
+        // Idle for 30 days, last execution finished 30 days ago.
+        let long_finished = workspace_idle_for(&pool, 30, false).await;
+        add_execution(&pool, long_finished, Some(30)).await;
+
+        // Pinned workspaces are held open deliberately.
+        let _pinned = workspace_idle_for(&pool, 30, true).await;
+
+        // Still running. A workspace blocked on an approval is in this state:
+        // the process that raised the approval has not completed.
+        let running = workspace_idle_for(&pool, 30, false).await;
+        add_execution(&pool, running, None).await;
+
+        // Touched recently.
+        let _fresh = workspace_idle_for(&pool, 1, false).await;
+
+        // Old workspace record, but its last run finished an hour ago.
+        let recently_ran = workspace_idle_for(&pool, 30, false).await;
+        add_execution(&pool, recently_ran, Some(0)).await;
+
+        // Already archived.
+        let archived = workspace_idle_for(&pool, 30, false).await;
+        sqlx::query("UPDATE workspaces SET archived = TRUE WHERE id = ?")
+            .bind(archived)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut idle = Workspace::find_idle_for_auto_archive(&pool, 7)
+            .await
+            .unwrap();
+        idle.sort();
+
+        let mut expected = vec![never_ran, long_finished];
+        expected.sort();
+        assert_eq!(idle, expected);
+    }
+
+    #[tokio::test]
+    async fn auto_archive_threshold_bounds_the_sweep() {
+        let pool = migrated_pool().await;
+        let five_days = workspace_idle_for(&pool, 5, false).await;
+
+        assert!(
+            Workspace::find_idle_for_auto_archive(&pool, 7)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            Workspace::find_idle_for_auto_archive(&pool, 3)
+                .await
+                .unwrap(),
+            vec![five_days]
+        );
+    }
 
     #[test]
     fn best_matching_container_ref_prefers_deepest_match() {
