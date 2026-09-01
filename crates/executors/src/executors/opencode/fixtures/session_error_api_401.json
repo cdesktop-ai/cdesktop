@@ -1,0 +1,15 @@
+{
+  "name": "APIError",
+  "data": {
+    "message": "API key is invalid.",
+    "statusCode": 401,
+    "isRetryable": false,
+    "responseHeaders": {
+      "cf-cache-status": "DYNAMIC",
+      "content-type": "application/json",
+      "server": "cloudflare"
+    },
+    "responseBody": "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"API key is invalid.\"},\"request_id\":null}",
+    "metadata": { "url": "https://api.anthropic.com/v1/messages" }
+  }
+}

@@ -192,7 +192,7 @@ export type RoutineRunStatus = "pending" | "running" | "done" | "skipped" | "fai
 
 export type RunNowResponse = { routine_run: RoutineRun, workspace_id: string | null, skipped: boolean, skip_reason: string | null, };
 
-export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
+export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, parent_session_id: string | null, created_at: string, updated_at: string, };
 
 export type ExecutionProcess = { id: string, session_id: string, run_reason: ExecutionProcessRunReason, executor_action: ExecutorAction, status: ExecutionProcessStatus, exit_code: bigint | null, 
 /**
@@ -218,15 +218,33 @@ export type MergeStatus = "open" | "merged" | "closed" | "unknown";
 
 export type PullRequestInfo = { number: bigint, url: string, status: MergeStatus, merged_at: string | null, merge_commit_sha: string | null, };
 
-export type ApprovalInfo = { approval_id: string, tool_name: string, execution_process_id: string, is_question: boolean, created_at: string, timeout_at: string, };
+export type ApprovalInfo = { approval_id: string, tool_name: string, execution_process_id: string, 
+/**
+ * What the operator is being asked to allow. An empty
+ * [`ApprovalPatterns::session`] means only a one-shot approval is on offer.
+ */
+patterns: ApprovalPatterns, is_question: boolean, created_at: string, timeout_at: string, };
 
-export type ApprovalStatus = { "status": "pending" } | { "status": "approved" } | { "status": "denied", reason?: string, } | { "status": "timed_out" };
+export type ApprovalPatterns = { 
+/**
+ * What this one request covers.
+ */
+request: Array<string>, 
+/**
+ * What approving with [`ApprovalScope::Session`] would allow for the rest
+ * of the run without asking again.
+ */
+session: Array<string>, };
+
+export type ApprovalScope = "once" | "session";
+
+export type ApprovalStatus = { "status": "pending" } | { "status": "approved", scope: ApprovalScope, } | { "status": "denied", reason?: string, } | { "status": "timed_out" };
 
 export type QuestionAnswer = { question: string, answer: Array<string>, };
 
 export type QuestionStatus = { "status": "answered", answers: Array<QuestionAnswer>, } | { "status": "timed_out" };
 
-export type ApprovalOutcome = { "status": "approved" } | { "status": "denied", reason?: string, } | { "status": "answered", answers: Array<QuestionAnswer>, } | { "status": "timed_out" };
+export type ApprovalOutcome = { "status": "approved", scope: ApprovalScope, } | { "status": "denied", reason?: string, } | { "status": "answered", answers: Array<QuestionAnswer>, } | { "status": "timed_out" };
 
 export type ApprovalResponse = { execution_process_id: string, status: ApprovalOutcome, };
 
@@ -306,7 +324,7 @@ export type UserSystemInfo = { version: string, config: Config, machine_id: stri
 /**
  * Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
  */
-capabilities: { [key in string]?: Array<BaseAgentCapability> }, shared_api_base: string | null, preview_proxy_port: number | null, executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
+capabilities: { [key in string]?: Array<BaseAgentCapability> }, service_capabilities: { [key in string]?: number }, shared_api_base: string | null, preview_proxy_port: number | null, executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
 
 export type Environment = { os_type: string, os_version: string, os_architecture: string, bitness: string, };
 
@@ -366,7 +384,18 @@ create_new_branch?: boolean,
  * Provider to route this message through. `None` = inherit from the
  * recipient's last execution (same fallback as `executor_config`).
  */
-selected_provider_id?: string, };
+selected_provider_id?: string, dedupe_key?: string, intent?: SessionCommandIntent, 
+/**
+ * Persist the command without claiming it. A recovery controller can
+ * dispatch it later after its provider-reachability gate passes.
+ */
+defer_dispatch?: boolean, 
+/**
+ * Declares this command as metered execution with the operator's
+ * `auto`/`ask`/`never` fallback policy. Enforced durably by the
+ * dispatcher gate before any claim.
+ */
+metered?: MeteredExecution, };
 
 export type SpawnTeammateRequest = { 
 /**
@@ -543,7 +572,7 @@ export type RepoBranchStatus = { repo_id: string, repo_name: string, commits_beh
 
 export type UpdateWorkspace = { archived: boolean | null, pinned: boolean | null, name: string | null, };
 
-export type UpdateSession = { name: string | null, };
+export type UpdateSession = { name: string | null, parent_session_id: string | null, };
 
 export type ReorderPinsRequest = { ordered_ids: Array<string>, };
 
@@ -607,7 +636,7 @@ export type WorkspaceSummaryResponse = { summaries: Array<WorkspaceSummary>, };
 
 export type DiffStats = { files_changed: number, lines_added: number, lines_removed: number, };
 
-export type PrimaryRepoInfo = { id: string, name: string, display_name: string, };
+export type PrimaryRepoInfo = { id: string, name: string, display_name: string, path: string, };
 
 export type DirectoryEntry = { name: string, path: string, is_directory: boolean, is_git_repo: boolean, last_modified: bigint | null, };
 
@@ -615,7 +644,15 @@ export type DirectoryListResponse = { entries: Array<DirectoryEntry>, current_pa
 
 export type SearchMode = "taskform" | "settings";
 
-export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, remote_onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, commit_reminder_enabled: boolean, commit_reminder_prompt: string | null, send_message_shortcut: SendMessageShortcut, relay_enabled: boolean, host_nickname: string | null, };
+export type Config = { config_version: string, theme: ThemeMode, executor_profile: ExecutorProfileId, disclaimer_acknowledged: boolean, onboarding_acknowledged: boolean, remote_onboarding_acknowledged: boolean, notifications: NotificationConfig, editor: EditorConfig, github: GitHubConfig, analytics_enabled: boolean, workspace_dir: string | null, last_app_version: string | null, show_release_notes: boolean, language: UiLanguage, git_branch_prefix: string, showcases: ShowcaseState, pr_auto_description_enabled: boolean, pr_auto_description_prompt: string | null, commit_reminder_enabled: boolean, commit_reminder_prompt: string | null, send_message_shortcut: SendMessageShortcut, relay_enabled: boolean, host_nickname: string | null, 
+/**
+ * Archive workspaces that have gone idle, so they stop accumulating.
+ */
+auto_archive_enabled: boolean, 
+/**
+ * Idle days before an unpinned, not-running workspace is archived.
+ */
+auto_archive_idle_days: number, };
 
 export type NotificationConfig = { sound_enabled: boolean, push_enabled: boolean, sound_file: SoundFile, };
 
@@ -639,21 +676,60 @@ export type SendMessageShortcut = "ModifierEnter" | "Enter";
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 
-export type QueuedMessage = { 
-/**
- * The session this message is queued for
- */
-session_id: string, 
-/**
- * The follow-up data (message + variant)
- */
-data: DraftFollowUpData, 
-/**
- * Timestamp when the message was queued
- */
-queued_at: string, };
+export type QueuedMessage = { session_id: string, data: DraftFollowUpData, queued_at: string, };
 
 export type QueueStatus = { "status": "empty" } | { "status": "queued", message: QueuedMessage, };
+
+export type SessionCommand = { id: string, session_id: string, dedupe_key: string | null, intent: SessionCommandIntent, body: string, config: SessionCommandConfig, state: SessionCommandState, execution_process_id: string | null, attempt_number: bigint, created_at: string, finished_at: string | null, };
+
+export type SessionCommandConfig = { executor_config: ExecutorConfig, selected_provider_id?: string, auth_binding_id?: string, 
+/**
+ * Declares this command as metered execution and carries the operator's
+ * `auto`/`ask`/`never` fallback policy; `None` means unmetered. Enforced
+ * durably by the dispatcher gate (`MeteredApproval::gate`).
+ */
+metered?: MeteredExecution, };
+
+export enum SessionCommandIntent { continue = "continue", replace = "replace" }
+
+export enum SessionCommandState { pending = "pending", claimed = "claimed", done = "done", failed = "failed", cancelled = "cancelled" }
+
+export type MeteredApproval = { id: string, session_command_id: string, policy: MeteredApprovalPolicy, state: MeteredApprovalState, account_alias: string | null, reason: string | null, 
+/**
+ * Set when an approval (or auto start) was consumed by a claimed
+ * attempt — the allow-once linkage.
+ */
+execution_process_id: string | null, created_at: string, resolved_at: string | null, };
+
+export enum MeteredApprovalPolicy { auto = "auto", ask = "ask", never = "never" }
+
+export enum MeteredApprovalState { pending = "pending", approved = "approved", denied = "denied", auto_started = "auto_started", blocked = "blocked" }
+
+export type MeteredExecution = { policy: MeteredApprovalPolicy, account_alias?: string, };
+
+export type ExecutionProcessOutcome = { execution_process_id: string, outcome: NormalizedExecutionOutcome, created_at: string, };
+
+export enum ExecutionOutcomeClass { quota_exhausted = "quota_exhausted", auth_expired = "auth_expired", auth_invalid = "auth_invalid", model_unavailable = "model_unavailable", rate_limited_transient = "rate_limited_transient", network_transient = "network_transient", user_stopped = "user_stopped", task_failed = "task_failed", unknown = "unknown" }
+
+export enum OutcomeBindingScope { account = "account", route = "route", task = "task" }
+
+export type NormalizedExecutionOutcome = { class: ExecutionOutcomeClass, 
+/**
+ * Stable provider error code (e.g. `usage_limit_exceeded`), never raw
+ * provider message text.
+ */
+provider_code?: string, retry_after_seconds?: bigint, resets_at?: string, binding_scope?: OutcomeBindingScope, 
+/**
+ * Fixed, cdesktop-owned description. Never contains provider text,
+ * credentials, headers, or account identifiers.
+ */
+safe_message: string, };
+
+export type MeteredApprovalResponseRequest = { approved: boolean, reason?: string, };
+
+export type ExecutionRoutingSettings = { enabled: boolean, routes: Array<ExecutionRoutingRoute>, meteredFallback: string, sameRouteRetries: number, transientBackoffSeconds: Array<number>, approvalTimeoutMinutes: number, allRoutesExhausted: string, notifyOnSwap: boolean, exposeAccountAlias: boolean, fallbackOnFreeFailure: boolean, };
+
+export type ExecutionRoutingRoute = { id: string, executor: string, model: string, billingClass: string, accountPool?: string | null, account?: string | null, };
 
 export type ConflictOp = "rebase" | "merge" | "cherry_pick" | "revert";
 
@@ -765,9 +841,9 @@ export type Codex = { append_prompt: AppendPrompt, sandbox?: SandboxMode | null,
 
 export type SandboxMode = "auto" | "read-only" | "workspace-write" | "danger-full-access";
 
-export type AskForApproval = "unless-trusted" | "on-failure" | "on-request" | "never";
+export type AskForApproval = "unless-trusted" | "on-request" | "never";
 
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ReasoningSummary = "auto" | "concise" | "detailed" | "none";
 
@@ -810,6 +886,11 @@ export type AppendPrompt = string | null;
 
 export type CodingAgentInitialRequest = { prompt: string, 
 /**
+ * Provenance of `prompt`. Defaults to `User` for back-compat with
+ * actions persisted before the marker existed.
+ */
+prompt_kind: PromptKind, 
+/**
  * Unified executor identity + overrides
  */
 executor_config: ExecutorConfig, 
@@ -818,6 +899,8 @@ executor_config: ExecutorConfig,
  * If None, uses the container_ref directory directly.
  */
 working_dir: string | null, };
+
+export type PromptKind = "user" | "spawn";
 
 export type CodingAgentFollowUpRequest = { prompt: string, session_id: string, reset_to_message_id: string | null, 
 /**

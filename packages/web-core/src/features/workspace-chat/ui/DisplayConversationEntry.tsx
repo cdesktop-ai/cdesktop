@@ -5,6 +5,7 @@ import {
   ActionType,
   BaseAgentCapability,
   NormalizedEntry,
+  PromptKind,
   ToolStatus,
   ToolResult,
   TodoItem,
@@ -22,6 +23,7 @@ import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { useTheme } from '@/shared/hooks/useTheme';
 import WYSIWYGEditor from '@/shared/components/WYSIWYGEditor';
 import { useMessageEditContext } from '../model/contexts/MessageEditContext';
+import { resolveUserMessageCollapse } from '../model/userMessageCollapse';
 import type { UseResetProcessResult } from '../model/hooks/useResetProcess';
 import { useChangesViewActions } from '@/shared/hooks/useChangesView';
 import { useLogsPanelActions } from '@/shared/hooks/useLogsPanel';
@@ -74,6 +76,8 @@ type Props = {
   resetAction: UseResetProcessResult;
   repos: RepoWithTargetBranch[];
   entry: NormalizedEntry | null;
+  /** Marker the backend recorded for a synthesized user message, if any. */
+  promptKind?: PromptKind;
   aggregatedGroup: AggregatedPatchGroup | null;
   aggregatedDiffGroup: AggregatedDiffGroup | null;
   aggregatedThinkingGroup: AggregatedThinkingGroup | null;
@@ -366,6 +370,7 @@ function DisplayConversationEntry(props: Props) {
       return (
         <UserMessageEntry
           content={entry.content}
+          promptKind={props.promptKind}
           expansionKey={expansionKey}
           workspaceId={workspaceWithSession?.id}
           sessionId={sessionId}
@@ -720,6 +725,7 @@ function GenericToolApprovalEntry({
  */
 function UserMessageEntry({
   content,
+  promptKind,
   expansionKey,
   workspaceId,
   sessionId,
@@ -728,6 +734,7 @@ function UserMessageEntry({
   resetAction,
 }: {
   content: string;
+  promptKind: PromptKind | undefined;
   expansionKey: string;
   workspaceId: string | undefined;
   sessionId: string | undefined;
@@ -735,7 +742,11 @@ function UserMessageEntry({
   executorCanFork: boolean;
   resetAction: UseResetProcessResult;
 }) {
-  const isLong = useMemo(() => content.split('\n').length > 20, [content]);
+  const { t } = useTranslation('common');
+  const collapse = useMemo(
+    () => resolveUserMessageCollapse(promptKind, content),
+    [promptKind, content]
+  );
   const [expanded, toggle] = usePersistedExpanded(
     `user:${expansionKey}`,
     false
@@ -768,8 +779,13 @@ function UserMessageEntry({
   return (
     <ChatUserMessage
       content={content}
-      expanded={isLong ? expanded : true}
-      onToggle={isLong ? toggle : undefined}
+      expanded={collapse.collapsible ? expanded : true}
+      onToggle={collapse.collapsible ? toggle : undefined}
+      collapsedLabel={
+        collapse.collapsesBehindHeader
+          ? t('conversation.spawnInstructions')
+          : undefined
+      }
       workspaceId={workspaceId}
       onEdit={canEdit ? handleEdit : undefined}
       onReset={canReset ? handleReset : undefined}

@@ -467,6 +467,7 @@ pub(super) async fn execute(
             pending_approvals: pending_approvals.clone(),
             models_cache_key: config.models_cache_key.clone(),
             cancel: cancel.clone(),
+            outcome: config.outcome.clone(),
         },
         event_resp,
     ));

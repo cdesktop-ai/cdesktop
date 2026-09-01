@@ -1,9 +1,13 @@
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
-import { LightningIcon, PauseCircleIcon, PlusIcon } from '@phosphor-icons/react';
+import {
+  LightningIcon,
+  PauseCircleIcon,
+  PlusIcon,
+} from '@phosphor-icons/react';
 import type { Routine } from 'shared/types';
 import { routinesApi } from '@/shared/lib/api';
+import { useRoutineNavigation } from '@/shared/hooks/useAppNavigation';
 import { Button } from '@vibe/ui/components/Button';
 import { formatScheduleSummary } from './scheduleFormat';
 
@@ -21,7 +25,7 @@ function formatNextRun(nextRunAt: string | null): string | null {
  */
 export function RoutinesListContent() {
   const { t } = useTranslation('common');
-  const navigate = useNavigate();
+  const routineNavigation = useRoutineNavigation();
 
   const { data: routines = [], isLoading } = useQuery<Routine[]>({
     queryKey: ['routines'],
@@ -40,7 +44,7 @@ export function RoutinesListContent() {
             </h1>
             <p className="text-base text-low">{t('routines.subtitle')}</p>
           </div>
-          <Button type="button" onClick={() => navigate({ to: '/routines/new' })}>
+          <Button type="button" onClick={routineNavigation.goToNewRoutine}>
             <PlusIcon className="size-icon-xs mr-half" weight="bold" />
             {t('routines.newButton')}
           </Button>
@@ -64,12 +68,7 @@ export function RoutinesListContent() {
                 <li key={routine.id}>
                   <button
                     type="button"
-                    onClick={() =>
-                      navigate({
-                        to: '/routines/$routineId',
-                        params: { routineId: routine.id },
-                      })
-                    }
+                    onClick={() => routineNavigation.goToRoutine(routine.id)}
                     className="w-full text-left rounded-sm bg-secondary hover:bg-panel px-double py-base transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-brand"
                   >
                     <div className="flex items-start justify-between gap-base">
@@ -89,7 +88,10 @@ export function RoutinesListContent() {
                       </div>
                       {!routine.enabled && (
                         <div className="shrink-0 self-center flex items-center gap-half text-sm text-low">
-                          <PauseCircleIcon className="size-icon-xs" weight="bold" />
+                          <PauseCircleIcon
+                            className="size-icon-xs"
+                            weight="bold"
+                          />
                           {t('routines.disabled')}
                         </div>
                       )}

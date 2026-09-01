@@ -18,23 +18,23 @@ use db::{
         },
         execution_process_repo_state::ExecutionProcessRepoState,
         repo::Repo,
-        scratch::{DraftFollowUpData, Scratch, ScratchType},
-        session::{Session, SessionError},
+        session::Session,
+        session_command::SessionCommand,
         workspace::Workspace,
         workspace_repo::WorkspaceRepo,
     },
 };
 use deployment::DeploymentError;
 use executors::{
-    actions::{
-        Executable, ExecutorAction, ExecutorActionType,
-        coding_agent_follow_up::CodingAgentFollowUpRequest,
-        coding_agent_initial::CodingAgentInitialRequest,
-    },
+    actions::{Executable, ExecutorAction, ExecutorActionType},
     approvals::{ExecutorApprovalService, NoopExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
-    executors::{BaseCodingAgent, CancellationToken, ExecutorExitResult, ExecutorExitSignal},
+    executors::{
+        CancellationToken, CodingAgent, ExecutorExitResult, ExecutorExitSignal,
+        StandardCodingAgentExecutor,
+    },
     logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
+    outcome::NormalizedExecutionOutcome,
 };
 use futures::{FutureExt, TryStreamExt, stream::select};
 use git::GitService;
@@ -42,28 +42,42 @@ use serde_json::json;
 use services::services::{
     analytics::AnalyticsContext,
     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
-    config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
+    config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT, MIN_AUTO_ARCHIVE_IDLE_DAYS},
     container::{ContainerError, ContainerRef, ContainerService},
     diff_stream::{self, DiffStreamHandle},
     file::FileService,
     notification::NotificationService,
-    queued_message::QueuedMessageService,
     remote_client::RemoteClient,
     remote_sync,
 };
-use tokio::{sync::RwLock, task::JoinHandle};
-use tokio_util::io::ReaderStream;
-use utils::{
-    log_msg::LogMsg,
-    msg_store::MsgStore,
-    text::{git_branch_id, short_uuid, truncate_to_char_boundary},
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinHandle,
 };
+use tokio_util::io::ReaderStream;
+use utils::{log_msg::LogMsg, msg_store::MsgStore, text::truncate_to_char_boundary};
 use uuid::Uuid;
 use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
 
-use crate::{command, copy};
+use crate::{command, copy, process_budget::HostProcessBudget};
 
 const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
+
+fn execution_current_dir(
+    worktree_root: Option<&Path>,
+    primary_repo_name: &str,
+    primary_repo_path: &Path,
+    executor_action: &ExecutorAction,
+) -> PathBuf {
+    match (worktree_root, executor_action.typ()) {
+        // Script actions retain a repository-relative working_dir so a chain
+        // can address each workspace repo. Resolve that relative path from
+        // the worktree root, not from the primary repository itself.
+        (Some(root), ExecutorActionType::ScriptRequest(_)) => root.to_path_buf(),
+        (Some(root), _) => root.join(primary_repo_name),
+        (None, _) => primary_repo_path.to_path_buf(),
+    }
+}
 
 #[derive(Clone)]
 pub struct LocalContainerService {
@@ -77,14 +91,15 @@ pub struct LocalContainerService {
     db_stream_handles: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
     exit_monitor_handles: Arc<RwLock<HashMap<Uuid, JoinHandle<()>>>>,
     workspace_touch_times: Arc<RwLock<HashMap<Uuid, Instant>>>,
+    scheduler_lock: Arc<Mutex<()>>,
     config: Arc<RwLock<Config>>,
     git: GitService,
     file_service: FileService,
     analytics: Option<AnalyticsContext>,
     approvals: Approvals,
-    queued_message_service: QueuedMessageService,
     notification_service: NotificationService,
     remote_client: Option<RemoteClient>,
+    process_budget: HostProcessBudget,
 }
 
 impl LocalContainerService {
@@ -98,8 +113,8 @@ impl LocalContainerService {
         file_service: FileService,
         analytics: Option<AnalyticsContext>,
         approvals: Approvals,
-        queued_message_service: QueuedMessageService,
         remote_client: Option<RemoteClient>,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
         let child_store = Arc::new(RwLock::new(HashMap::new()));
         let cancellation_tokens = Arc::new(RwLock::new(HashMap::new()));
@@ -117,14 +132,15 @@ impl LocalContainerService {
             db_stream_handles,
             exit_monitor_handles,
             workspace_touch_times,
+            scheduler_lock: Arc::new(Mutex::new(())),
             config,
             git,
             file_service,
             analytics,
             approvals,
-            queued_message_service,
             notification_service,
             remote_client,
+            process_budget: HostProcessBudget::start(shutdown),
         };
 
         container.spawn_workspace_cleanup();
@@ -247,10 +263,9 @@ impl LocalContainerService {
         if !workspace.use_worktree {
             return;
         }
-        let Some(container_ref) = &workspace.container_ref else {
+        let Some(workspace_dir) = WorkspaceManager::workspace_dir_for(workspace) else {
             return;
         };
-        let workspace_dir = PathBuf::from(container_ref);
 
         let repositories = WorkspaceRepo::find_repos_for_workspace(&self.db.pool, workspace.id)
             .await
@@ -304,6 +319,50 @@ impl LocalContainerService {
         Ok(())
     }
 
+    /// Archive workspaces that have gone idle, so they stop accumulating.
+    ///
+    /// The idle threshold is floored at [`MIN_AUTO_ARCHIVE_IDLE_DAYS`] so that
+    /// auto-archive can never fire before the 72-hour worktree retention window
+    /// has already elapsed. Archiving therefore never shortens how long an
+    /// idle worktree survives on disk, whatever the operator configures.
+    async fn auto_archive_idle_workspaces(&self) -> Result<(), DeploymentError> {
+        // Archiving moves a workspace from the 72-hour retention window into
+        // the one-hour one, so it is upstream of worktree deletion and honours
+        // the same kill switch. `pnpm run dev` sets this, which keeps a
+        // developer's live workspaces untouched.
+        if std::env::var("DISABLE_WORKTREE_CLEANUP").is_ok() {
+            tracing::info!(
+                "Auto-archive is disabled via DISABLE_WORKTREE_CLEANUP environment variable"
+            );
+            return Ok(());
+        }
+        let (enabled, idle_days) = {
+            let config = self.config.read().await;
+            (config.auto_archive_enabled, config.auto_archive_idle_days)
+        };
+        if !enabled {
+            return Ok(());
+        }
+        let idle_days = idle_days.max(MIN_AUTO_ARCHIVE_IDLE_DAYS);
+
+        let idle = Workspace::find_idle_for_auto_archive(&self.db.pool, idle_days).await?;
+        if idle.is_empty() {
+            tracing::debug!("No idle workspaces to auto-archive");
+            return Ok(());
+        }
+        tracing::info!(
+            "Auto-archiving {} workspaces idle for more than {} days",
+            idle.len(),
+            idle_days
+        );
+        for workspace_id in idle {
+            if let Err(e) = self.archive_workspace(workspace_id).await {
+                tracing::error!("Failed to auto-archive workspace {}: {}", workspace_id, e);
+            }
+        }
+        Ok(())
+    }
+
     fn spawn_workspace_cleanup(&self) {
         let container = self.clone();
         tokio::spawn(async move {
@@ -317,6 +376,14 @@ impl LocalContainerService {
             loop {
                 cleanup_interval.tick().await;
                 tracing::info!("Starting periodic workspace cleanup...");
+                // Archive first: a freshly archived workspace becomes eligible
+                // for worktree cleanup on the next tick, not this one.
+                container
+                    .auto_archive_idle_workspaces()
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!("Failed to auto-archive idle workspaces: {}", e)
+                    });
                 container
                     .cleanup_expired_workspaces()
                     .await
@@ -509,10 +576,7 @@ impl LocalContainerService {
                 .map(|rx| rx.boxed()) // wait for result
                 .unwrap_or_else(|| std::future::pending().boxed()); // no signal, stall forever
 
-            let status_result: std::io::Result<std::process::ExitStatus>;
-
-            // Wait for process to exit, or exit signal from executor
-            tokio::select! {
+            let outcome = tokio::select! {
                 // Exit signal with result.
                 // Some coding agent processes do not automatically exit after processing the user request; instead the executor
                 // signals when processing has finished to gracefully kill the process.
@@ -525,40 +589,36 @@ impl LocalContainerService {
                         }
                     }
 
-                    // Map the exit result to appropriate exit status
-                    status_result = match exit_result {
-                        Ok(ExecutorExitResult::Success) => Ok(success_exit_status()),
-                        Ok(ExecutorExitResult::Failure) => Ok(failure_exit_status()),
-                        Err(_) => Ok(success_exit_status()), // Channel closed, assume success
-                    };
+                    NormalizedProcessOutcome::from_executor_signal(exit_result)
                 }
                 // Process exit
                 exit_status_result = &mut process_exit_rx => {
-                    status_result = exit_status_result.unwrap_or_else(|e| Err(std::io::Error::other(e)));
+                    NormalizedProcessOutcome::from_exit_status_result(
+                        exit_status_result.unwrap_or_else(|e| Err(std::io::Error::other(e))),
+                    )
                 }
-            }
+            };
+            let (status, exit_code) = outcome.status_and_exit_code();
 
-            let (exit_code, status) = match status_result {
-                Ok(exit_status) => {
-                    let code = exit_status.code().unwrap_or(-1) as i64;
-                    let status = if exit_status.success() {
-                        ExecutionProcessStatus::Completed
-                    } else {
-                        ExecutionProcessStatus::Failed
-                    };
-                    (Some(code), status)
+            let completed_attempt = match ExecutionProcess::complete_running_attempt(
+                &db.pool,
+                exec_id,
+                status,
+                exit_code,
+                outcome.normalized_outcome(),
+            )
+            .await
+            {
+                Ok(completed) => completed,
+                Err(e) => {
+                    tracing::error!("Failed to update execution process completion: {}", e);
+                    false
                 }
-                Err(_) => (None, ExecutionProcessStatus::Failed),
             };
 
-            if !ExecutionProcess::was_stopped(&db.pool, exec_id).await
-                && let Err(e) =
-                    ExecutionProcess::update_completion(&db.pool, exec_id, status, exit_code).await
+            if completed_attempt
+                && let Ok(ctx) = ExecutionProcess::load_context(&db.pool, exec_id).await
             {
-                tracing::error!("Failed to update execution process completion: {}", e);
-            }
-
-            if let Ok(ctx) = ExecutionProcess::load_context(&db.pool, exec_id).await {
                 // Update executor session summary if available
                 if let Err(e) = container.update_executor_session_summary(&exec_id).await {
                     tracing::warn!("Failed to update executor session summary: {}", e);
@@ -585,135 +645,61 @@ impl LocalContainerService {
                     }
                 }
 
-                if container.should_finalize(&ctx) {
-                    let has_chained_follow_up = ctx
-                        .execution_process
-                        .executor_action()
-                        .ok()
-                        .and_then(|action| action.next_action())
-                        .is_some();
-                    let mut started_queued_follow_up = false;
+                let has_chained_follow_up = ctx
+                    .execution_process
+                    .executor_action()
+                    .ok()
+                    .and_then(|action| action.next_action())
+                    .is_some();
 
-                    // Only execute queued messages if the execution succeeded
-                    // If it failed or was killed, just clear the queue and finalize
-                    let should_execute_queued = !matches!(
-                        ctx.execution_process.status,
-                        ExecutionProcessStatus::Failed | ExecutionProcessStatus::Killed
-                    );
-
-                    if let Some(queued_msg) =
-                        container.queued_message_service.take_queued(ctx.session.id)
-                    {
-                        if should_execute_queued {
-                            tracing::info!(
-                                "Found queued message for session {}, starting follow-up execution",
-                                ctx.session.id
-                            );
-
-                            // Delete the scratch since we're consuming the queued message
-                            if let Err(e) = Scratch::delete(
-                                &db.pool,
-                                ctx.session.id,
-                                &ScratchType::DraftFollowUp,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "Failed to delete scratch after consuming queued message: {}",
-                                    e
-                                );
-                            }
-
-                            // Execute the queued follow-up
-                            if let Err(e) = container
-                                .start_queued_follow_up(&ctx, &queued_msg.data)
-                                .await
-                            {
-                                tracing::error!("Failed to start queued follow-up: {}", e);
-                                // Fall back to finalization if follow-up fails
-                                container.finalize_task(&ctx).await;
-                            } else {
-                                started_queued_follow_up = true;
-                            }
-                        } else {
-                            // Execution failed or was killed - discard the queued message and finalize
-                            tracing::info!(
-                                "Discarding queued message for session {} due to execution status {:?}",
-                                ctx.session.id,
-                                ctx.execution_process.status
-                            );
-                            container.finalize_task(&ctx).await;
-                        }
-                    } else {
-                        container.finalize_task(&ctx).await;
-                    }
-
-                    let should_mark_turn_unseen = matches!(
-                        ctx.execution_process.run_reason,
-                        ExecutionProcessRunReason::CodingAgent
-                    ) && !has_chained_follow_up
-                        && !started_queued_follow_up;
-
-                    if should_mark_turn_unseen
-                        && let Err(e) = CodingAgentTurn::mark_unseen_by_execution_process_id(
-                            &db.pool,
-                            ctx.execution_process.id,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            "Failed to mark coding agent turn unseen for execution {}: {}",
-                            ctx.execution_process.id,
-                            e
-                        );
-                    }
-                }
-
-                // When a parallel setup script finishes and no coding agent is running,
-                // consume any queued message that was stuck waiting
                 if matches!(
                     ctx.execution_process.run_reason,
-                    ExecutionProcessRunReason::SetupScript
-                ) && !container.should_finalize(&ctx)
+                    ExecutionProcessRunReason::CodingAgent
+                ) && let Err(error) =
+                    SessionCommand::finish_execution(&db.pool, ctx.execution_process.id, success)
+                        .await
                 {
-                    let has_running_agent = ExecutionProcess::has_running_coding_agent_for_session(
-                        &db.pool,
-                        ctx.session.id,
-                    )
-                    .await
-                    .unwrap_or(true);
-
-                    if !has_running_agent
-                        && let Some(queued_msg) =
-                            container.queued_message_service.take_queued(ctx.session.id)
-                    {
-                        tracing::info!(
-                            "Parallel setup script finished with queued message for session {}, starting follow-up",
-                            ctx.session.id
-                        );
-
-                        if let Err(e) =
-                            Scratch::delete(&db.pool, ctx.session.id, &ScratchType::DraftFollowUp)
-                                .await
-                        {
-                            tracing::warn!(
-                                "Failed to delete scratch after consuming queued message: {}",
-                                e
-                            );
-                        }
-
-                        if let Err(e) = container
-                            .start_queued_follow_up(&ctx, &queued_msg.data)
-                            .await
-                        {
-                            tracing::error!(
-                                "Failed to start queued follow-up from setup script completion: {}",
-                                e
-                            );
-                        }
-                    }
+                    tracing::error!(
+                        "Failed to finish commands for execution {}: {}",
+                        ctx.execution_process.id,
+                        error
+                    );
                 }
 
+                if let Err(error) = container.dispatch_all_pending_commands().await {
+                    tracing::error!("Failed to dispatch pending session commands: {}", error);
+                }
+
+                let has_running_agent = ExecutionProcess::has_running_coding_agent_for_session(
+                    &db.pool,
+                    ctx.session.id,
+                )
+                .await
+                .unwrap_or(true);
+
+                if container.should_finalize(&ctx) && !has_running_agent {
+                    container.finalize_task(&ctx).await;
+                }
+
+                let should_mark_turn_unseen = matches!(
+                    ctx.execution_process.run_reason,
+                    ExecutionProcessRunReason::CodingAgent
+                ) && !has_chained_follow_up
+                    && !has_running_agent;
+
+                if should_mark_turn_unseen
+                    && let Err(error) = CodingAgentTurn::mark_unseen_by_execution_process_id(
+                        &db.pool,
+                        ctx.execution_process.id,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to mark coding agent turn unseen for execution {}: {}",
+                        ctx.execution_process.id,
+                        error
+                    );
+                }
                 // Fire analytics event when CodingAgent execution has finished
                 if config.read().await.analytics_enabled
                     && matches!(
@@ -764,9 +750,11 @@ impl LocalContainerService {
                 }
             }
 
-            // Now that commit/next-action/finalization steps for this process are complete,
-            // capture the HEAD OID as the definitive "after" state (best-effort).
-            container.update_after_head_commits(exec_id).await;
+            if completed_attempt {
+                // Now that commit/next-action/finalization steps for this process are complete,
+                // capture the HEAD OID as the definitive "after" state (best-effort).
+                container.update_after_head_commits(exec_id).await;
+            }
 
             // Wait for DB persistence to complete before cleaning up MsgStore
             let db_stream_handle = container.take_db_stream_handle(&exec_id).await;
@@ -823,11 +811,6 @@ impl LocalContainerService {
             }
         });
         rx
-    }
-
-    fn dir_name_from_workspace(workspace_id: &Uuid, task_title: &str) -> String {
-        let task_title_id = git_branch_id(task_title);
-        format!("{}-{}", short_uuid(workspace_id), task_title_id)
     }
 
     async fn track_child_msgs_in_store(
@@ -1019,87 +1002,70 @@ impl LocalContainerService {
 
         Ok(())
     }
-
-    /// Start a follow-up execution from a queued message
-    async fn start_queued_follow_up(
-        &self,
-        ctx: &ExecutionContext,
-        queued_data: &DraftFollowUpData,
-    ) -> Result<ExecutionProcess, ContainerError> {
-        let executor_profile_id = queued_data.executor_config.profile_id();
-
-        // Validate executor matches session if session has prior executions
-        let expected_executor: Option<String> =
-            ExecutionProcess::latest_executor_profile_for_session(&self.db.pool, ctx.session.id)
-                .await?
-                .map(|profile| profile.executor.to_string())
-                .or_else(|| ctx.session.executor.clone());
-
-        if let Some(expected) = expected_executor {
-            let actual = executor_profile_id.executor.to_string();
-            if expected != actual {
-                return Err(SessionError::ExecutorMismatch { expected, actual }.into());
-            }
-        }
-
-        if ctx.session.executor.is_none() {
-            Session::update_executor(
-                &self.db.pool,
-                ctx.session.id,
-                &executor_profile_id.executor.to_string(),
-            )
-            .await?;
-        }
-
-        // Get latest agent turn for session continuity (from coding agent turns)
-        let latest_session_info =
-            CodingAgentTurn::find_latest_session_info(&self.db.pool, ctx.session.id).await?;
-
-        let working_dir = ctx
-            .session
-            .agent_working_dir
-            .as_ref()
-            .filter(|dir| !dir.is_empty())
-            .cloned();
-
-        let action_type = if let Some(info) = latest_session_info {
-            ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
-                prompt: queued_data.message.clone(),
-                session_id: info.session_id,
-                reset_to_message_id: None,
-                executor_config: queued_data.executor_config.clone(),
-                working_dir: working_dir.clone(),
-            })
-        } else {
-            ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-                prompt: queued_data.message.clone(),
-                executor_config: queued_data.executor_config.clone(),
-                working_dir,
-            })
-        };
-
-        let action = ExecutorAction::new(action_type, None);
-
-        self.start_execution(
-            &ctx.workspace,
-            &ctx.session,
-            &action,
-            &ExecutionProcessRunReason::CodingAgent,
-        )
-        .await
-    }
 }
 
-fn failure_exit_status() -> std::process::ExitStatus {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        ExitStatusExt::from_raw(256) // Exit code 1 (shifted by 8 bits)
+#[derive(Debug, Clone, PartialEq)]
+enum NormalizedProcessOutcome {
+    Success {
+        exit_code: i64,
+    },
+    Failure {
+        exit_code: Option<i64>,
+        /// Normalized classification when the executor observed a stable
+        /// provider signal; `None` falls back to `Unknown` at read time.
+        outcome: Option<NormalizedExecutionOutcome>,
+    },
+}
+
+impl NormalizedProcessOutcome {
+    fn from_executor_signal(
+        result: Result<ExecutorExitResult, tokio::sync::oneshot::error::RecvError>,
+    ) -> Self {
+        match result {
+            Ok(ExecutorExitResult::Success) => Self::Success { exit_code: 0 },
+            Ok(ExecutorExitResult::Failure(outcome)) => Self::Failure {
+                exit_code: Some(1),
+                outcome,
+            },
+            Err(_) => Self::Failure {
+                exit_code: Some(1),
+                outcome: None,
+            },
+        }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::ExitStatusExt;
-        ExitStatusExt::from_raw(1)
+
+    fn from_exit_status_result(result: std::io::Result<std::process::ExitStatus>) -> Self {
+        match result {
+            Ok(status) => {
+                let exit_code = status.code().unwrap_or(-1) as i64;
+                if status.success() {
+                    Self::Success { exit_code }
+                } else {
+                    Self::Failure {
+                        exit_code: Some(exit_code),
+                        outcome: None,
+                    }
+                }
+            }
+            Err(_) => Self::Failure {
+                exit_code: None,
+                outcome: None,
+            },
+        }
+    }
+
+    fn status_and_exit_code(&self) -> (ExecutionProcessStatus, Option<i64>) {
+        match self {
+            Self::Success { exit_code } => (ExecutionProcessStatus::Completed, Some(*exit_code)),
+            Self::Failure { exit_code, .. } => (ExecutionProcessStatus::Failed, *exit_code),
+        }
+    }
+
+    fn normalized_outcome(&self) -> Option<&NormalizedExecutionOutcome> {
+        match self {
+            Self::Success { .. } => None,
+            Self::Failure { outcome, .. } => outcome.as_ref(),
+        }
     }
 }
 
@@ -1119,6 +1085,14 @@ impl ContainerService for LocalContainerService {
 
     fn notification_service(&self) -> &NotificationService {
         &self.notification_service
+    }
+
+    fn scheduler_lock(&self) -> &Mutex<()> {
+        &self.scheduler_lock
+    }
+
+    fn ensure_launch_admission(&self) -> Result<(), ContainerError> {
+        self.process_budget.ensure_available()
     }
 
     async fn touch(&self, workspace: &Workspace) -> Result<(), ContainerError> {
@@ -1188,8 +1162,7 @@ impl ContainerService for LocalContainerService {
         }
 
         let label = workspace.name.as_deref().unwrap_or("workspace");
-        let workspace_dir_name =
-            LocalContainerService::dir_name_from_workspace(&workspace.id, label);
+        let workspace_dir_name = WorkspaceManager::dir_name_from_workspace(&workspace.id, label);
         let workspace_dir = WorkspaceManager::get_workspace_base_dir().join(&workspace_dir_name);
 
         let (repositories, workspace_inputs) = self.workspace_repo_inputs(workspace.id).await?;
@@ -1247,7 +1220,7 @@ impl ContainerService for LocalContainerService {
         } else {
             let label = workspace.name.as_deref().unwrap_or("workspace");
             let workspace_dir_name =
-                LocalContainerService::dir_name_from_workspace(&workspace.id, label);
+                WorkspaceManager::dir_name_from_workspace(&workspace.id, label);
             WorkspaceManager::get_workspace_base_dir().join(&workspace_dir_name)
         };
 
@@ -1331,27 +1304,29 @@ impl ContainerService for LocalContainerService {
         } else {
             None
         };
-        let current_dir = match &worktree_root {
-            Some(root) => root.join(&primary_repo.name),
-            None => primary_repo.path.clone(),
-        };
+        let current_dir = execution_current_dir(
+            worktree_root.as_deref(),
+            &primary_repo.name,
+            &primary_repo.path,
+            executor_action,
+        );
 
-        let approvals_service: Arc<dyn ExecutorApprovalService> =
-            match executor_action.base_executor() {
-                Some(
-                    BaseCodingAgent::Codex
-                    | BaseCodingAgent::ClaudeCode
-                    | BaseCodingAgent::Gemini
-                    | BaseCodingAgent::QwenCode
-                    | BaseCodingAgent::Opencode,
-                ) => ExecutorApprovalBridge::new(
-                    self.approvals.clone(),
-                    self.db.clone(),
-                    self.notification_service.clone(),
-                    execution_process.id,
-                ),
-                _ => Arc::new(NoopExecutorApprovalService {}),
-            };
+        // The adapter decides whether it brokers approvals; an executor this
+        // file has never heard of cannot end up silently unable to ask.
+        let brokers_approvals = executor_action
+            .base_executor()
+            .and_then(CodingAgent::registered)
+            .is_some_and(|agent| agent.brokers_approvals());
+        let approvals_service: Arc<dyn ExecutorApprovalService> = if brokers_approvals {
+            ExecutorApprovalBridge::new(
+                self.approvals.clone(),
+                self.db.clone(),
+                self.notification_service.clone(),
+                execution_process.id,
+            )
+        } else {
+            Arc::new(NoopExecutorApprovalService {})
+        };
 
         let repo_names: Vec<String> = repos.iter().map(|r| r.name.clone()).collect();
         // Absolute on-disk paths for every repo in order. Direct-mode repos
@@ -1395,16 +1370,11 @@ impl ContainerService for LocalContainerService {
             tracing::debug!(keys = ?provider_env.keys().collect::<Vec<_>>(), "injecting provider env");
             env.provider_vars = provider_env.clone();
         }
-        // Codex-specific spawn injection (config overrides + model_provider id).
-        // Read by `Codex::build_thread_start_params` and merged into the
-        // app-server's ThreadStartParams.
-        if let Some(provider_codex) = &executor_action.provider_codex {
-            tracing::debug!(
-                keys = ?provider_codex.config_overrides.keys().collect::<Vec<_>>(),
-                model_provider = %provider_codex.model_provider_id,
-                "injecting codex provider overrides"
-            );
-            env.provider_codex = Some(provider_codex.clone());
+        // Structured injection travels opaquely; only the harness that
+        // emitted it can read it back out of the spawn env.
+        if let Some(structured) = &executor_action.provider_structured {
+            tracing::debug!(?structured, "injecting structured provider payload");
+            env.provider_structured = Some(structured.clone());
         }
 
         // Create the child and stream, add to execution tracker with timeout
@@ -1448,20 +1418,34 @@ impl ContainerService for LocalContainerService {
         execution_process: &ExecutionProcess,
         status: ExecutionProcessStatus,
     ) -> Result<(), ContainerError> {
-        let child = self
-            .get_child_from_store(&execution_process.id)
-            .await
-            .ok_or_else(|| {
-                ContainerError::Other(anyhow!("Child process not found for execution"))
-            })?;
+        let Some(child) = self.get_child_from_store(&execution_process.id).await else {
+            // No child in this server's store means the row is an orphan
+            // (previous process, or the child was already reaped). The stop
+            // must still reach a terminal state instead of erroring and
+            // leaving the row running forever.
+            tracing::warn!(
+                execution_process_id = %execution_process.id,
+                "stopping execution with no live child; terminalizing the orphan row"
+            );
+            let requeue = status == ExecutionProcessStatus::Killed;
+            ExecutionProcess::update_completion(
+                &self.db().pool,
+                execution_process.id,
+                status,
+                None,
+            )
+            .await?;
+            if requeue {
+                SessionCommand::requeue_killed_execution(&self.db().pool, execution_process.id)
+                    .await?;
+            }
+            return Ok(());
+        };
         let exit_code = if status == ExecutionProcessStatus::Completed {
             Some(0)
         } else {
             None
         };
-
-        ExecutionProcess::update_completion(&self.db.pool, execution_process.id, status, exit_code)
-            .await?;
 
         // Try graceful cancellation first, then force kill
         if let Some(cancel) = self.take_cancellation_token(&execution_process.id).await {
@@ -1495,6 +1479,13 @@ impl ContainerService for LocalContainerService {
                 return Err(e);
             }
         }
+
+        // Terminal state is the durable record that the stop side effect has
+        // completed. Never publish it before cancellation/kill succeeds: a
+        // keyed-stop replay must not mistake an interrupted intent for a
+        // stopped process after restart.
+        ExecutionProcess::update_completion(&self.db.pool, execution_process.id, status, exit_code)
+            .await?;
         self.remove_child_from_store(&execution_process.id).await;
 
         // Mark the process finished in the MsgStore and wait for DB persistence
@@ -1684,15 +1675,106 @@ impl ContainerService for LocalContainerService {
         Ok(())
     }
 }
-fn success_exit_status() -> std::process::ExitStatus {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        ExitStatusExt::from_raw(0)
+#[cfg(test)]
+mod tests {
+    use executors::actions::script::{ScriptContext, ScriptRequest, ScriptRequestLanguage};
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            ExitStatusExt::from_raw(code << 8)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            ExitStatusExt::from_raw(code as u32)
+        }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::ExitStatusExt;
-        ExitStatusExt::from_raw(0)
+
+    #[test]
+    fn normalizes_exit_status_to_process_outcome() {
+        assert_eq!(
+            NormalizedProcessOutcome::from_exit_status_result(Ok(exit_status(0))),
+            NormalizedProcessOutcome::Success { exit_code: 0 }
+        );
+        assert_eq!(
+            NormalizedProcessOutcome::from_exit_status_result(Ok(exit_status(2))),
+            NormalizedProcessOutcome::Failure {
+                exit_code: Some(2),
+                outcome: None
+            }
+        );
+        assert_eq!(
+            NormalizedProcessOutcome::from_exit_status_result(Err(std::io::Error::other(
+                "missing child"
+            ))),
+            NormalizedProcessOutcome::Failure {
+                exit_code: None,
+                outcome: None
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_executor_signal_fails_closed() {
+        let (tx, rx) = oneshot::channel::<ExecutorExitResult>();
+        drop(tx);
+
+        assert_eq!(
+            NormalizedProcessOutcome::from_executor_signal(rx.blocking_recv()),
+            NormalizedProcessOutcome::Failure {
+                exit_code: Some(1),
+                outcome: None
+            }
+        );
+        assert_eq!(
+            NormalizedProcessOutcome::from_executor_signal(Ok(ExecutorExitResult::Success)),
+            NormalizedProcessOutcome::Success { exit_code: 0 }
+        );
+    }
+
+    #[test]
+    fn executor_signal_failure_preserves_normalized_outcome() {
+        use executors::outcome::{ExecutionOutcomeClass, NormalizedExecutionOutcome};
+
+        let outcome = NormalizedExecutionOutcome::new(ExecutionOutcomeClass::QuotaExhausted)
+            .with_provider_code("usage_limit_exceeded");
+        let normalized = NormalizedProcessOutcome::from_executor_signal(Ok(
+            ExecutorExitResult::Failure(Some(outcome.clone())),
+        ));
+
+        assert_eq!(normalized.normalized_outcome(), Some(&outcome));
+        assert_eq!(
+            normalized.status_and_exit_code(),
+            (ExecutionProcessStatus::Failed, Some(1))
+        );
+    }
+
+    #[test]
+    fn worktree_setup_script_resolves_repo_dir_from_workspace_root() {
+        let root = Path::new("/tmp/workspace");
+        let action = ExecutorAction::new(
+            ExecutorActionType::ScriptRequest(ScriptRequest {
+                script: "true".to_string(),
+                language: ScriptRequestLanguage::Bash,
+                context: ScriptContext::SetupScript,
+                working_dir: Some("catapult-games".to_string()),
+            }),
+            None,
+        );
+
+        assert_eq!(
+            execution_current_dir(
+                Some(root),
+                "catapult-games",
+                Path::new("/source/catapult-games"),
+                &action,
+            ),
+            root,
+        );
     }
 }

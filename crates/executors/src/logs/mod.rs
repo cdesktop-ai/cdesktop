@@ -139,7 +139,7 @@ pub enum ToolStatus {
 impl ToolStatus {
     pub fn from_approval_status(status: &ApprovalStatus) -> Option<Self> {
         match status {
-            ApprovalStatus::Approved => Some(ToolStatus::Created),
+            ApprovalStatus::Approved { .. } => Some(ToolStatus::Created),
             ApprovalStatus::Denied { reason } => Some(ToolStatus::Denied {
                 reason: reason.clone(),
             }),

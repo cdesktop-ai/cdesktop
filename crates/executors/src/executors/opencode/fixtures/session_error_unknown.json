@@ -1,0 +1,6 @@
+{
+  "name": "UnknownError",
+  "data": {
+    "message": "Model not found: anthropic/claude-sonnet-4-5. Did you mean: claude-sonnet-4-5, claude-sonnet-4-5-20250929?"
+  }
+}

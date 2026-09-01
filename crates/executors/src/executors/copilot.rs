@@ -91,6 +91,10 @@ impl StandardCodingAgentExecutor for Copilot {
         self.approvals = Some(approvals);
     }
 
+    fn brokers_approvals(&self) -> bool {
+        true
+    }
+
     fn apply_overrides(&mut self, executor_config: &ExecutorConfig) {
         if let Some(model_id) = &executor_config.model_id
             && !model_id.is_empty()

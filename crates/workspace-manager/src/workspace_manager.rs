@@ -14,6 +14,7 @@ use db::{
 use git::{GitService, GitServiceError};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
+use utils::text::{git_branch_id, short_uuid};
 use uuid::Uuid;
 use worktree_manager::{WorktreeCleanup, WorktreeError, WorktreeManager};
 
@@ -29,6 +30,160 @@ impl RepoWorkspaceInput {
             repo,
             target_branch,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{str::FromStr, sync::Once};
+
+    use db::{
+        DBService,
+        models::{
+            repo::Repo,
+            session::{CreateSession, Session},
+            workspace::{CreateWorkspace, Workspace as DbWorkspace},
+            workspace_repo::{CreateWorkspaceRepo, WorkspaceRepo},
+        },
+    };
+    use sqlx::{
+        SqlitePool,
+        sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    };
+    use tempfile::TempDir;
+    use uuid::Uuid;
+    use worktree_manager::WorktreeManager;
+
+    use super::WorkspaceManager;
+
+    static WORKTREE_BASE_OVERRIDE: Once = Once::new();
+
+    async fn migrated_pool() -> (TempDir, SqlitePool) {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("test.sqlite");
+        let database_url = format!("sqlite://{}", db_path.to_string_lossy());
+        let options = SqliteConnectOptions::from_str(&database_url)
+            .expect("sqlite options")
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Delete);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect sqlite");
+
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        (temp_dir, pool)
+    }
+
+    async fn count(pool: &SqlitePool, table: &str) -> i64 {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        sqlx::query_scalar::<_, i64>(&sql)
+            .fetch_one(pool)
+            .await
+            .expect("count")
+    }
+
+    #[tokio::test]
+    async fn failed_start_cleanup_removes_absent_container_ref_orphans() {
+        let workspace_base = tempfile::tempdir().expect("workspace base");
+        WORKTREE_BASE_OVERRIDE.call_once(|| {
+            WorktreeManager::set_workspace_dir_override(workspace_base.path().to_path_buf());
+        });
+
+        let repo_dir = tempfile::tempdir().expect("repo dir");
+        let (_db_dir, pool) = migrated_pool().await;
+        let manager = WorkspaceManager::new(DBService { pool: pool.clone() });
+
+        let repo = Repo::find_or_create(&pool, repo_dir.path(), "repo", false)
+            .await
+            .expect("repo");
+        let workspace_id = Uuid::new_v4();
+        let workspace = DbWorkspace::create(
+            &pool,
+            &CreateWorkspace {
+                branch: "cdt/test-failed-start".to_string(),
+                name: Some("failed start".to_string()),
+                use_worktree: true,
+            },
+            workspace_id,
+        )
+        .await
+        .expect("workspace");
+        assert!(workspace.container_ref.is_none());
+
+        WorkspaceRepo::create_many(
+            &pool,
+            workspace.id,
+            &[CreateWorkspaceRepo {
+                repo_id: repo.id,
+                target_branch: "main".to_string(),
+            }],
+        )
+        .await
+        .expect("workspace repo");
+
+        let session = Session::create(
+            &pool,
+            &CreateSession {
+                executor: Some("qa-mock".to_string()),
+                name: None,
+                parent_session_id: None,
+            },
+            Uuid::new_v4(),
+            workspace.id,
+        )
+        .await
+        .expect("session");
+        let execution_process_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO execution_processes
+                (id, session_id, run_reason, executor_action, status)
+               VALUES (?, ?, 'codingagent', '{}', 'running')"#,
+        )
+        .bind(execution_process_id)
+        .bind(session.id)
+        .execute(&pool)
+        .await
+        .expect("execution process");
+
+        let workspace_dir = WorkspaceManager::workspace_dir_for(&workspace).expect("workspace dir");
+        let repo_worktree_dir = workspace_dir.join(&repo.name);
+        tokio::fs::create_dir_all(&repo_worktree_dir)
+            .await
+            .expect("workspace dir");
+        let session_log_dir = utils::execution_logs::process_logs_session_dir(session.id);
+        tokio::fs::create_dir_all(&session_log_dir)
+            .await
+            .expect("session log dir");
+
+        let managed = manager
+            .load_managed_workspace(workspace)
+            .await
+            .expect("managed workspace");
+        let deletion_context = managed
+            .prepare_deletion_context()
+            .await
+            .expect("deletion context");
+        assert_eq!(
+            deletion_context.workspace_dir.as_ref(),
+            Some(&workspace_dir)
+        );
+
+        assert_eq!(managed.delete_record().await.expect("delete record"), 1);
+        WorkspaceManager::cleanup_deletion_context(deletion_context, false)
+            .await
+            .expect("cleanup context");
+
+        assert_eq!(count(&pool, "workspaces").await, 0);
+        assert_eq!(count(&pool, "workspace_repos").await, 0);
+        assert_eq!(count(&pool, "sessions").await, 0);
+        assert_eq!(count(&pool, "execution_processes").await, 0);
+        assert!(!workspace_dir.exists());
+        assert!(!session_log_dir.exists());
     }
 }
 
@@ -188,7 +343,7 @@ impl ManagedWorkspace {
         Ok(WorkspaceDeletionContext {
             workspace_id: self.workspace.id,
             branch_name: self.workspace.branch.clone(),
-            workspace_dir: self.workspace.container_ref.clone().map(PathBuf::from),
+            workspace_dir: WorkspaceManager::workspace_dir_for(&self.workspace),
             repositories,
             repo_paths,
             session_ids,
@@ -225,63 +380,87 @@ impl WorkspaceManager {
         delete_branches: bool,
     ) {
         tokio::spawn(async move {
-            let WorkspaceDeletionContext {
-                workspace_id,
-                branch_name,
-                workspace_dir,
-                repositories,
-                repo_paths,
-                session_ids,
-            } = context;
-
-            for session_id in session_ids {
-                if let Err(e) = Self::remove_session_process_logs(session_id).await {
-                    warn!(
-                        "Failed to remove filesystem process logs for session {}: {}",
-                        session_id, e
-                    );
-                }
+            if let Err(e) = Self::cleanup_deletion_context(context, delete_branches).await {
+                error!("Background workspace deletion cleanup failed: {}", e);
             }
+        });
+    }
 
-            if let Some(workspace_dir) = workspace_dir {
-                info!(
-                    "Starting background cleanup for workspace {} at {}",
-                    workspace_id,
-                    workspace_dir.display()
+    pub fn dir_name_from_workspace(workspace_id: &Uuid, workspace_label: &str) -> String {
+        let workspace_label_id = git_branch_id(workspace_label);
+        format!("{}-{}", short_uuid(workspace_id), workspace_label_id)
+    }
+
+    pub fn workspace_dir_for(workspace: &DbWorkspace) -> Option<PathBuf> {
+        if !workspace.use_worktree {
+            return None;
+        }
+
+        if let Some(container_ref) = workspace
+            .container_ref
+            .as_deref()
+            .filter(|container_ref| !container_ref.is_empty())
+        {
+            return Some(PathBuf::from(container_ref));
+        }
+
+        let label = workspace.name.as_deref().unwrap_or("workspace");
+        Some(
+            Self::get_workspace_base_dir()
+                .join(Self::dir_name_from_workspace(&workspace.id, label)),
+        )
+    }
+
+    pub async fn cleanup_deletion_context(
+        context: WorkspaceDeletionContext,
+        delete_branches: bool,
+    ) -> Result<(), WorkspaceError> {
+        let WorkspaceDeletionContext {
+            workspace_id,
+            branch_name,
+            workspace_dir,
+            repositories,
+            repo_paths,
+            session_ids,
+        } = context;
+
+        for session_id in session_ids {
+            if let Err(e) = Self::remove_session_process_logs(session_id).await {
+                warn!(
+                    "Failed to remove filesystem process logs for session {}: {}",
+                    session_id, e
                 );
-
-                if let Err(e) = Self::cleanup_workspace(&workspace_dir, &repositories).await {
-                    error!(
-                        "Background workspace cleanup failed for {} at {}: {}",
-                        workspace_id,
-                        workspace_dir.display(),
-                        e
-                    );
-                } else {
-                    info!(
-                        "Background cleanup completed for workspace {}",
-                        workspace_id
-                    );
-                }
             }
+        }
 
-            if delete_branches {
-                let git_service = GitService::new();
-                for repo_path in repo_paths {
-                    match git_service.delete_branch(&repo_path, &branch_name) {
-                        Ok(()) => {
-                            info!("Deleted branch '{}' from repo {:?}", branch_name, repo_path);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to delete branch '{}' from repo {:?}: {}",
-                                branch_name, repo_path, e
-                            );
-                        }
+        if let Some(workspace_dir) = workspace_dir {
+            info!(
+                "Cleaning up workspace {} at {}",
+                workspace_id,
+                workspace_dir.display()
+            );
+            Self::cleanup_workspace(&workspace_dir, &repositories).await?;
+            info!("Cleanup completed for workspace {}", workspace_id);
+        }
+
+        if delete_branches {
+            let git_service = GitService::new();
+            for repo_path in repo_paths {
+                match git_service.delete_branch(&repo_path, &branch_name) {
+                    Ok(()) => {
+                        info!("Deleted branch '{}' from repo {:?}", branch_name, repo_path);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to delete branch '{}' from repo {:?}: {}",
+                            branch_name, repo_path, e
+                        );
                     }
                 }
             }
-        });
+        }
+
+        Ok(())
     }
 
     async fn remove_session_process_logs(session_id: Uuid) -> Result<(), std::io::Error> {

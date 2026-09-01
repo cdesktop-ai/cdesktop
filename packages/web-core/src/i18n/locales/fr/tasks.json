@@ -186,7 +186,6 @@
       "errorExecutorRequiresProvider": "La création inter-exécuteurs nécessite un fournisseur + modèle. Utilisez le CLI `cdesktop team spawn` pour cela.",
       "errorNameInvalid": "Le nom est vide, trop long ou contient des sauts de ligne.",
       "errorWorkspaceArchived": "Impossible de créer des coéquipiers dans un espace de travail archivé.",
-      "errorNotLead": "Seule la session principale peut créer des coéquipiers depuis le CLI.",
       "successToast": "Coéquipier « {{name}} » créé",
       "renameAction": "Renommer",
       "deleteAction": "Supprimer",

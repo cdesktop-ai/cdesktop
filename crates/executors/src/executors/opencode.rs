@@ -24,15 +24,18 @@ use crate::{
     logs::utils::patch,
     model_selector::{AgentInfo, ModelInfo, ModelProvider, PermissionPolicy, ReasoningOption},
     profile::ExecutorConfig,
+    provider::{ProviderContext, ProviderInjection, ProviderInjectionError},
     stdout_dup::create_stdout_pipe_writer,
 };
 
 mod models;
 mod normalize_logs;
+mod outcome;
 pub(crate) mod sdk;
 mod slash_commands;
 pub(crate) mod types;
 
+use outcome::OutcomeSink;
 use sdk::{
     AgentInfo as SDKAgentInfo, LogWriter, RunConfig, build_authenticated_client,
     generate_server_password, list_agents, list_commands, list_providers, run_session,
@@ -203,6 +206,7 @@ impl Opencode {
         let commit_reminder = env.commit_reminder;
         let commit_reminder_prompt = env.commit_reminder_prompt.clone();
         let repo_context = env.repo_context.clone();
+        let outcome_for_task = OutcomeSink::default();
 
         tokio::spawn(async move {
             // Wait for server to print listening URL
@@ -213,7 +217,9 @@ impl Opencode {
                     let _ = log_writer
                         .log_error(format!("OpenCode startup error: {err}"))
                         .await;
-                    let _ = exit_signal_tx.send(ExecutorExitResult::Failure);
+                    outcome_for_task.record(outcome::startup_failure());
+                    let _ =
+                        exit_signal_tx.send(ExecutorExitResult::Failure(outcome_for_task.take()));
                     return;
                 }
             };
@@ -233,6 +239,7 @@ impl Opencode {
                 commit_reminder,
                 commit_reminder_prompt,
                 repo_context,
+                outcome: outcome_for_task.clone(),
             };
 
             let result = match slash_command {
@@ -247,7 +254,7 @@ impl Opencode {
                     let _ = log_writer
                         .log_error(format!("OpenCode executor error: {err}"))
                         .await;
-                    ExecutorExitResult::Failure
+                    ExecutorExitResult::Failure(outcome_for_task.take())
                 }
             };
             let _ = exit_signal_tx.send(exit_result);
@@ -426,13 +433,88 @@ impl StandardCodingAgentExecutor for Opencode {
         self.approvals = Some(approvals);
     }
 
+    fn brokers_approvals(&self) -> bool {
+        true
+    }
+
+    fn provider_slot(&self) -> &'static str {
+        "opencode"
+    }
+
+    /// OpenCode's session API takes `(provider_id, model_id)` and its only
+    /// signal for the split is the first `/`. A record's enabled models are
+    /// stored as raw vendor ids (`openai/gpt-5.4-mini` for OpenRouter), which
+    /// would split to the wrong provider, so prefix the record slug — the same
+    /// key [`Self::build_provider_injection`] registers the provider under.
+    ///
+    /// No-op for ambient records, whose ids already come prefixed out of
+    /// executor discovery, and for ids that already carry the slug.
+    fn provider_model_id(&self, ctx: &ProviderContext) -> String {
+        let prefix = format!("{}/", ctx.slug);
+        if ctx.ambient || ctx.model_id.starts_with(&prefix) {
+            return ctx.model_id.clone();
+        }
+        format!("{prefix}{}", ctx.model_id)
+    }
+
+    /// Ship the provider/model config through `OPENCODE_CONFIG_CONTENT`, which
+    /// OpenCode loads after the user's global and project configs — so our
+    /// keys win without touching `~/.config/opencode/`.
+    ///
+    /// `enabled_models` must be non-empty: OpenCode's runtime deletes any
+    /// provider whose `models` map is empty (`provider.ts:1393`), silently
+    /// breaking the agent.
+    ///
+    /// `baseURL` and `apiKey` are inserted after the slot's own `options`, and
+    /// `OPENCODE_CONFIG_CONTENT` after its own `env`, so a vendor-quirk entry
+    /// can never shadow the endpoint or the credential.
+    fn build_provider_injection(
+        &self,
+        ctx: &ProviderContext,
+    ) -> Result<ProviderInjection, ProviderInjectionError> {
+        let api_key = ctx.require_api_key(BaseCodingAgent::Opencode)?;
+        let base_url = ctx.require_base_url(BaseCodingAgent::Opencode)?;
+        if ctx.enabled_models.is_empty() {
+            return Err(ProviderInjectionError::EmptyEnabledModels);
+        }
+
+        let mut options = ctx.payload.extra_object("options");
+        options.insert("baseURL".to_string(), Value::String(base_url.to_string()));
+        options.insert("apiKey".to_string(), Value::String(api_key.to_string()));
+
+        let models: Map<String, Value> = ctx
+            .enabled_models
+            .iter()
+            .map(|id| (id.clone(), Value::Object(Map::new())))
+            .collect();
+
+        let mut provider = Map::new();
+        if let Some(npm) = ctx.payload.extra_str("npm") {
+            provider.insert("npm".to_string(), Value::String(npm.to_string()));
+        }
+        provider.insert("name".to_string(), Value::String(ctx.record_name.clone()));
+        provider.insert("options".to_string(), Value::Object(options));
+        provider.insert("models".to_string(), Value::Object(models));
+
+        let providers = Map::from_iter([(ctx.slug.clone(), Value::Object(provider))]);
+        let config = Map::from_iter([("provider".to_string(), Value::Object(providers))]);
+
+        let mut env = ctx.payload.env.clone();
+        env.insert(
+            "OPENCODE_CONFIG_CONTENT".to_string(),
+            serde_json::to_string(&Value::Object(config))?,
+        );
+        Ok(ProviderInjection::from_env(env))
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let env = setup_permissions_env(self.auto_approve, env);
+        let env = setup_database_env(env);
+        let env = setup_permissions_env(self.auto_approve, &env);
         let env = setup_compaction_env(self.auto_compact, &env);
         self.spawn_inner(current_dir, prompt, None, &env).await
     }
@@ -445,7 +527,8 @@ impl StandardCodingAgentExecutor for Opencode {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let env = setup_permissions_env(self.auto_approve, env);
+        let env = setup_database_env(env);
+        let env = setup_permissions_env(self.auto_approve, &env);
         let env = setup_compaction_env(self.auto_compact, &env);
         self.spawn_inner(current_dir, prompt, Some(session_id), &env)
             .await
@@ -788,6 +871,43 @@ fn default_to_true() -> bool {
     true
 }
 
+/// Pin OpenCode's session database to a cdesktop-owned path.
+///
+/// OpenCode resolves its database from the ambient XDG data dir, which cdesktop
+/// shares with whatever else launched it - a database another tool has left
+/// mid-migration takes down every spawn that touches it. Owning the path makes
+/// that unreachable.
+///
+/// The path is per-installation, not per-spawn: a follow-up starts a *new*
+/// server and resumes by session id, so the session must still be there. An
+/// explicit `OPENCODE_DB` still wins, which is what makes the behaviour
+/// testable and lets an operator relocate it.
+fn setup_database_env(env: &ExecutionEnv) -> ExecutionEnv {
+    if env.get("OPENCODE_DB").is_some() {
+        return env.clone();
+    }
+
+    let database_path = workspace_utils::assets::asset_dir()
+        .join("opencode")
+        .join("opencode.db");
+
+    if let Some(parent) = database_path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        // Leaving OPENCODE_DB unset falls back to the ambient database, which
+        // still works whenever it is healthy.
+        tracing::warn!(
+            path = %parent.display(),
+            "Could not create the OpenCode database directory: {err}"
+        );
+        return env.clone();
+    }
+
+    let mut env = env.clone();
+    env.insert("OPENCODE_DB", database_path.to_string_lossy().as_ref());
+    env
+}
+
 fn setup_permissions_env(auto_approve: bool, env: &ExecutionEnv) -> ExecutionEnv {
     let mut env = env.clone();
 
@@ -847,4 +967,112 @@ fn merge_compaction_config(existing_json: Option<&str>) -> String {
     config.insert("compaction".to_string(), Value::Object(compaction));
 
     serde_json::to_string(&config).unwrap_or_else(|_| r#"{"compaction":{"auto":true}}"#.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{env::RepoContext, provider::ProviderPayload};
+
+    fn env() -> ExecutionEnv {
+        ExecutionEnv::new(RepoContext::default(), false, String::new())
+    }
+
+    fn context(ambient: bool, slug: &str, model_id: &str) -> ProviderContext {
+        ProviderContext {
+            ambient,
+            record_name: "Test Provider".to_string(),
+            slug: slug.to_string(),
+            api_key: Some("sk-real".to_string()),
+            payload: ProviderPayload::from_slot(Some(&json!({
+                "baseUrl": "https://openrouter.ai/api/v1",
+            }))),
+            enabled_models: vec![model_id.to_string()],
+            model_id: model_id.to_string(),
+        }
+    }
+
+    /// The slug/model split OpenCode's session API needs is this adapter's
+    /// business. It has to agree with the key the same adapter registers the
+    /// provider under, which is why both live here.
+    #[test]
+    fn model_ids_carry_the_slug_opencode_splits_on() {
+        let agent = serde_json::from_value::<Opencode>(json!({})).unwrap();
+
+        let ctx = context(false, "openrouter", "openai/gpt-5.4-mini");
+        assert_eq!(
+            agent.provider_model_id(&ctx),
+            "openrouter/openai/gpt-5.4-mini"
+        );
+
+        // Already prefixed: idempotent, not double-prefixed.
+        let ctx = context(false, "openrouter", "openrouter/openai/gpt-5.4-mini");
+        assert_eq!(
+            agent.provider_model_id(&ctx),
+            "openrouter/openai/gpt-5.4-mini"
+        );
+
+        // Ambient ids already come prefixed out of executor discovery.
+        let ctx = context(true, "openrouter", "anthropic/claude-opus-4-5");
+        assert_eq!(agent.provider_model_id(&ctx), "anthropic/claude-opus-4-5");
+    }
+
+    /// The registered provider key and the model-id prefix are the same slug —
+    /// if they drifted, every session would ask a provider that does not exist.
+    #[test]
+    fn registered_provider_key_matches_the_model_id_prefix() {
+        let agent = serde_json::from_value::<Opencode>(json!({})).unwrap();
+        let ctx = context(false, "custom", "gpt-4");
+
+        let env = agent
+            .build_provider_injection(&ctx)
+            .expect("injection builds")
+            .env
+            .expect("non-ambient record emits env");
+        let config: Value =
+            serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).expect("config is JSON");
+
+        let model_id = agent.provider_model_id(&ctx);
+        let (slug, _) = model_id.split_once('/').expect("id carries a slug");
+        assert!(config["provider"][slug].is_object());
+    }
+
+    #[test]
+    fn spawns_own_the_opencode_database_by_default() {
+        let pinned = setup_database_env(&env());
+
+        let path = std::path::PathBuf::from(
+            pinned
+                .get("OPENCODE_DB")
+                .expect("spawns must not inherit the ambient database"),
+        );
+        assert!(path.starts_with(workspace_utils::assets::asset_dir()));
+        assert!(
+            path.parent().is_some_and(std::path::Path::is_dir),
+            "the database directory must exist before OpenCode opens it"
+        );
+    }
+
+    #[test]
+    fn a_follow_up_resumes_against_the_same_database() {
+        // Resume starts a fresh server and asks it for an existing session, so
+        // the two spawns have to agree on where sessions live.
+        assert_eq!(
+            setup_database_env(&env()).get("OPENCODE_DB"),
+            setup_database_env(&env()).get("OPENCODE_DB")
+        );
+    }
+
+    #[test]
+    fn an_explicit_database_is_left_alone() {
+        let mut configured = env();
+        configured.insert("OPENCODE_DB", "/tmp/operator-chosen/opencode.db");
+
+        assert_eq!(
+            setup_database_env(&configured).get("OPENCODE_DB").unwrap(),
+            "/tmp/operator-chosen/opencode.db"
+        );
+    }
 }

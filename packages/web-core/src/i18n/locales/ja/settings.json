@@ -21,6 +21,8 @@
         "reposDesc": "フォルダスクリプトと設定",
         "agents": "エージェント",
         "agentsDesc": "コーディングエージェントの設定",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "mcp": "MCPサーバー",
         "mcpDesc": "モデルコンテキストプロトコルサーバー",
         "organizations": "Organization Settings",
@@ -196,6 +198,17 @@
         "customPrompt": {
           "useCustom": "カスタムプロンプトを使用",
           "helper": "コミットリマインダー用のカスタムプロンプト。gitステータスは自動的に追加されます。"
+        }
+      },
+      "workspaces": {
+        "title": "ワークスペース",
+        "description": "ワークスペースの終了方法を設定します",
+        "autoArchive": {
+          "label": "非アクティブなワークスペースをアーカイブ",
+          "helper": "実行中でも固定中でもなく、最近のアクティビティがないワークスペースを自動的にアーカイブします。アーカイブ後もアーカイブフィルターから利用でき、Git ブランチは保持されます。",
+          "idleLabel": "アーカイブまでの非アクティブ期間",
+          "idleHelper": "ワークスペースがアーカイブされるまで非アクティブである必要がある期間です。",
+          "days": "{{days}} 日"
         }
       },
       "notifications": {

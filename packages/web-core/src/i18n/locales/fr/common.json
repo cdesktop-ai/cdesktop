@@ -71,7 +71,8 @@
     "emptyDescription": "La conversation de votre session apparaîtra ici dès qu'un nouveau tour commencera.",
     "toolName": {
       "Skill": "Compétence"
-    }
+    },
+    "spawnInstructions": "Instructions de lancement"
   },
   "changesPanel": {
     "notGitRepo": "Pas un dépôt Git — aucun diff disponible"
@@ -599,10 +600,7 @@
       "prFilterLabel": "PR",
       "prFilterAll": "All",
       "prFilterHasPr": "Has PR",
-      "prFilterNoPr": "No PR",
-      "noProject": "No project",
-      "sortButtonTitle": "Sort sessions",
-      "filterButtonTitle": "Filter sessions"
+      "prFilterNoPr": "No PR"
     },
     "sortAscending": "Ascending",
     "sortDescending": "Descending",
@@ -931,6 +929,11 @@
     },
     "sidebar": {
       "nav": "Routines"
+    }
+  },
+  "agents": {
+    "sidebar": {
+      "nav": "Agents"
     }
   }
 }

@@ -97,6 +97,7 @@ pub struct UserSystemInfo {
     pub environment: Environment,
     /// Capabilities supported per executor (e.g., { "CLAUDE_CODE": ["SESSION_FORK"] })
     pub capabilities: HashMap<String, Vec<BaseAgentCapability>>,
+    pub service_capabilities: HashMap<String, u32>,
     pub shared_api_base: Option<String>,
     pub preview_proxy_port: Option<u16>,
 }
@@ -170,6 +171,7 @@ async fn get_user_system_info(
             }
             caps
         },
+        service_capabilities: HashMap::from([("managed_task_launch".into(), 1)]),
         shared_api_base: deployment.remote_info().get_api_base(),
         preview_proxy_port: deployment.client_info().get_preview_proxy_port(),
     };

@@ -12,20 +12,20 @@ use axum::{
 use db::models::{
     coding_agent_turn::{CodingAgentTurn, TurnSelection},
     execution_process::{ExecutionProcess, ExecutionProcessRunReason},
-    provider::{AgentInjection, Provider},
+    execution_process_outcome::ExecutionProcessOutcome,
+    metered_approval::MeteredExecution,
+    provider::Provider,
     requests::UpdateSession,
     scratch::{Scratch, ScratchType},
     session::{CreateSession, Session, SessionError},
+    session_command::{
+        NewSessionCommand, SessionCommand, SessionCommandConfig, SessionCommandIntent,
+    },
     workspace::{Workspace, WorkspaceError},
     workspace_repo::WorkspaceRepo,
 };
 use deployment::Deployment;
-use executors::{
-    actions::{
-        ExecutorAction, ExecutorActionType, coding_agent_follow_up::CodingAgentFollowUpRequest,
-    },
-    profile::ExecutorConfig,
-};
+use executors::profile::ExecutorConfig;
 use serde::Deserialize;
 use services::services::container::ContainerService;
 use ts_rs::TS;
@@ -66,6 +66,15 @@ pub async fn get_session(
     Ok(ResponseJson(ApiResponse::success(session)))
 }
 
+async fn list_outcomes(
+    Extension(session): Extension<Session>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Vec<ExecutionProcessOutcome>>>, ApiError> {
+    let outcomes =
+        ExecutionProcessOutcome::find_by_session_id(&deployment.db().pool, session.id).await?;
+    Ok(ResponseJson(ApiResponse::success(outcomes)))
+}
+
 pub async fn create_session(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateSessionRequest>,
@@ -84,6 +93,7 @@ pub async fn create_session(
         &CreateSession {
             executor: payload.executor,
             name: payload.name,
+            parent_session_id: None,
         },
         Uuid::new_v4(),
         payload.workspace_id,
@@ -100,7 +110,13 @@ pub async fn update_session(
 ) -> Result<ResponseJson<ApiResponse<Session>>, ApiError> {
     let pool = &deployment.db().pool;
 
-    Session::update(pool, session.id, request.name.as_deref()).await?;
+    Session::update(
+        pool,
+        session.id,
+        request.name.as_deref(),
+        request.parent_session_id,
+    )
+    .await?;
 
     let updated = Session::find_by_id(pool, session.id)
         .await?
@@ -146,6 +162,23 @@ pub struct CreateFollowUpAttempt {
     #[serde(default)]
     #[ts(optional)]
     pub selected_provider_id: Option<Uuid>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub dedupe_key: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub intent: Option<SessionCommandIntent>,
+    /// Persist the command without claiming it. A recovery controller can
+    /// dispatch it later after its provider-reachability gate passes.
+    #[serde(default)]
+    #[ts(optional)]
+    pub defer_dispatch: Option<bool>,
+    /// Declares this command as metered execution with the operator's
+    /// `auto`/`ask`/`never` fallback policy. Enforced durably by the
+    /// dispatcher gate before any claim.
+    #[serde(default)]
+    #[ts(optional)]
+    pub metered: Option<MeteredExecution>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -160,7 +193,7 @@ pub async fn follow_up(
     State(deployment): State<DeploymentImpl>,
     headers: HeaderMap,
     Json(mut payload): Json<CreateFollowUpAttempt>,
-) -> Result<ResponseJson<ApiResponse<ExecutionProcess>>, ApiError> {
+) -> Result<ResponseJson<ApiResponse<SessionCommand>>, ApiError> {
     let pool = &deployment.db().pool;
 
     // `cdesktop team send` sets this header so the server can attribute the
@@ -170,6 +203,7 @@ pub async fn follow_up(
         .get("x-cdesktop-from-session")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
+    reject_self_delivery(team_from_session, session.id)?;
 
     // Load workspace from session
     let mut workspace = Workspace::find_by_id(pool, session.workspace_id)
@@ -178,7 +212,7 @@ pub async fn follow_up(
             "Workspace not found".to_string(),
         )))?;
 
-    tracing::info!("{:?}", workspace);
+    tracing::debug!("{:?}", workspace);
 
     // Worktree-disabled mode: optionally checkout a branch in the real repo,
     // then record the resulting HEAD into workspace.branch. User is trusted
@@ -278,24 +312,15 @@ pub async fn follow_up(
             .await?;
     }
 
-    let latest_session_info = CodingAgentTurn::find_latest_session_info(pool, session.id).await?;
-
     let prompt = payload.prompt;
     let prompt_byte_count = prompt.len();
 
-    let working_dir = session
-        .agent_working_dir
-        .as_ref()
-        .filter(|dir| !dir.is_empty())
-        .cloned();
-
-    // Resolve the provider up front so we can both prefix the OpenCode model
-    // id (see `Provider::prefix_opencode_model_id`) before the action_type is
-    // built AND reuse the loaded record to build the spawn injection.
+    // Resolve the provider up front so the model id reaches the enqueued
+    // config in the form the target harness addresses models by.
     // TODO(phase-G): map ProviderError variants to a structured ApiError code
     // (e.g. PROVIDER_MISSING_API_KEY) so the picker can render a "configure
     // API key for this provider" CTA instead of a generic 400.
-    let resolved_provider = if let Some(provider_id) = payload.selected_provider_id {
+    if let Some(provider_id) = payload.selected_provider_id {
         let provider = Provider::find_by_id(pool, provider_id)
             .await
             .map_err(|_| ApiError::BadRequest(format!("Provider '{provider_id}' not found")))?;
@@ -308,70 +333,58 @@ pub async fn follow_up(
         }
 
         if let Some(m) = executor_config.model_id.as_deref() {
-            executor_config.model_id =
-                Some(provider.prefix_opencode_model_id(executor_config.executor, m));
+            executor_config.model_id = Some(
+                provider
+                    .provider_model_id(executor_config.executor, m)
+                    .map_err(|e| ApiError::BadRequest(e.to_string()))?,
+            );
         }
+    }
 
-        Some(provider)
-    } else {
-        None
-    };
-
-    let action_type = if let Some(info) = latest_session_info {
-        let is_reset = payload.retry_process_id.is_some();
-        ExecutorActionType::CodingAgentFollowUpRequest(CodingAgentFollowUpRequest {
-            prompt: prompt.clone(),
-            session_id: info.session_id,
-            reset_to_message_id: if is_reset { info.message_id } else { None },
-            executor_config: executor_config.clone(),
-            working_dir: working_dir.clone(),
-        })
-    } else {
-        ExecutorActionType::CodingAgentInitialRequest(
-            executors::actions::coding_agent_initial::CodingAgentInitialRequest {
-                prompt,
-                executor_config: executor_config.clone(),
-                working_dir,
+    let intent = payload.intent.unwrap_or(SessionCommandIntent::Continue);
+    let (command, inserted) = SessionCommand::enqueue(
+        pool,
+        NewSessionCommand {
+            session_id: session.id,
+            dedupe_key: payload.dedupe_key,
+            intent: intent.clone(),
+            body: prompt,
+            config: SessionCommandConfig {
+                executor_config,
+                selected_provider_id: payload.selected_provider_id,
+                auth_binding_id: payload.selected_provider_id,
+                metered: payload.metered,
             },
-        )
-    };
-
-    // Build the spawn-time provider injection if a provider was selected for
-    // this message. `Provider::build_agent_injection` dispatches per agent —
-    // Codex emits env + ThreadStartParams overrides; every other agent uses
-    // env-only.
-    let injection = if let Some(provider) = resolved_provider {
-        let model_id = executor_config.model_id.as_deref().unwrap_or("");
-        provider
-            .build_agent_injection(executor_config.executor, model_id)
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?
-    } else {
-        AgentInjection::default()
-    };
-
-    let selected_provider_id_str = payload.selected_provider_id.map(|id| id.to_string());
-    let selected_model_id_str = executor_config.model_id.clone();
-
-    let action = {
-        let mut a = ExecutorAction::new(action_type, None);
-        if let Some(env) = injection.env {
-            a = a.with_provider_env(env);
+        },
+    )
+    .await?;
+    // The replacement and the cancellation of what it supersedes are already
+    // committed by `enqueue`, so the interrupt below can only ever land on a
+    // queue that is durably correct.
+    if inserted && intent == SessionCommandIntent::Replace {
+        for process in ExecutionProcess::find_by_session_id(pool, session.id, false).await? {
+            if process.status == db::models::execution_process::ExecutionProcessStatus::Running
+                && process.run_reason == ExecutionProcessRunReason::CodingAgent
+            {
+                deployment
+                    .container()
+                    .stop_execution(
+                        &process,
+                        db::models::execution_process::ExecutionProcessStatus::Killed,
+                    )
+                    .await?;
+            }
         }
-        if let Some(codex) = injection.codex {
-            a = a.with_provider_codex(codex);
-        }
-        a.with_provider_selection(selected_provider_id_str, selected_model_id_str)
-    };
-
-    let execution_process = deployment
-        .container()
-        .start_execution(
-            &workspace,
-            &session,
-            &action,
-            &ExecutionProcessRunReason::CodingAgent,
-        )
-        .await?;
+    }
+    if !payload.defer_dispatch.unwrap_or(false) {
+        deployment
+            .container()
+            .dispatch_pending_commands(session.id)
+            .await?;
+    }
+    let command = SessionCommand::find_by_id(pool, command.id)
+        .await?
+        .ok_or(ApiError::Database(sqlx::Error::RowNotFound))?;
 
     // Clear the draft follow-up scratch on successful spawn
     // This ensures the scratch is wiped even if the user navigates away quickly
@@ -403,7 +416,83 @@ pub async fn follow_up(
             .await;
     }
 
-    Ok(ResponseJson(ApiResponse::success(execution_process)))
+    Ok(ResponseJson(ApiResponse::success(command)))
+}
+
+fn reject_self_delivery(sender: Option<Uuid>, recipient: Uuid) -> Result<(), ApiError> {
+    if sender == Some(recipient) {
+        return Err(ApiError::Conflict(
+            "A session cannot send a peer command to itself".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn list_commands(
+    Extension(session): Extension<Session>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<Vec<SessionCommand>>>, ApiError> {
+    Ok(ResponseJson(ApiResponse::success(
+        SessionCommand::for_session(&deployment.db().pool, session.id).await?,
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+struct RequeueCommandsRequest {
+    execution_process_id: Uuid,
+}
+
+/// Recover all commands claimed by one execution observed dead by the
+/// caller. The native queue keeps the same rows and dedupe keys; dispatch is
+/// explicit so the recovery controller can gate on provider reachability.
+async fn requeue_commands(
+    Extension(session): Extension<Session>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<RequeueCommandsRequest>,
+) -> Result<ResponseJson<ApiResponse<usize>>, ApiError> {
+    let pool = &deployment.db().pool;
+    if let Some(process) = ExecutionProcess::find_by_id(pool, payload.execution_process_id).await? {
+        if process.session_id != session.id {
+            return Err(ApiError::BadRequest(
+                "Execution does not belong to this session.".into(),
+            ));
+        }
+        if process.status == db::models::execution_process::ExecutionProcessStatus::Running {
+            return Err(ApiError::Conflict(
+                "Cannot requeue commands while the execution is running.".into(),
+            ));
+        }
+        let count =
+            if process.status == db::models::execution_process::ExecutionProcessStatus::Killed {
+                SessionCommand::requeue_killed_execution(pool, payload.execution_process_id).await?
+            } else {
+                SessionCommand::requeue_execution(pool, payload.execution_process_id).await?
+            };
+        if count == 0 {
+            return Err(ApiError::Conflict(
+                "No interrupted command is available to requeue for this execution.".into(),
+            ));
+        }
+        return Ok(ResponseJson(ApiResponse::success(count as usize)));
+    }
+    let count = SessionCommand::requeue_execution(pool, payload.execution_process_id).await?;
+    if count == 0 {
+        return Err(ApiError::Conflict(
+            "No interrupted command is available to requeue for this execution.".into(),
+        ));
+    }
+    Ok(ResponseJson(ApiResponse::success(count as usize)))
+}
+
+async fn dispatch_commands(
+    Extension(session): Extension<Session>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    deployment
+        .container()
+        .dispatch_pending_commands(session.id)
+        .await?;
+    Ok(ResponseJson(ApiResponse::success(())))
 }
 
 pub async fn get_turn_selections(
@@ -510,6 +599,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             get(get_session).put(update_session).delete(delete_session),
         )
         .route("/follow-up", post(follow_up))
+        .route("/outcomes", get(list_outcomes))
+        .route("/commands", get(list_commands))
+        .route("/commands/requeue", post(requeue_commands))
+        .route("/commands/dispatch", post(dispatch_commands))
         .route("/turn-selections", get(get_turn_selections))
         .route("/reset", post(reset_process))
         .route("/setup", post(run_setup_script))
@@ -526,4 +619,21 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .nest("/{session_id}/queue", queue::router(deployment));
 
     Router::new().nest("/sessions", sessions_router)
+}
+
+#[cfg(test)]
+mod peer_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn peer_delivery_refuses_self_before_enqueue() {
+        let session_id = Uuid::new_v4();
+
+        assert!(matches!(
+            reject_self_delivery(Some(session_id), session_id),
+            Err(ApiError::Conflict(_))
+        ));
+        assert!(reject_self_delivery(Some(Uuid::new_v4()), session_id).is_ok());
+        assert!(reject_self_delivery(None, session_id).is_ok());
+    }
 }

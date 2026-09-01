@@ -62,6 +62,7 @@ pub async fn run_codex_setup(
                     &CreateSession {
                         executor: Some("codex".to_string()),
                         name: None,
+                        parent_session_id: None,
                     },
                     Uuid::new_v4(),
                     workspace.id,

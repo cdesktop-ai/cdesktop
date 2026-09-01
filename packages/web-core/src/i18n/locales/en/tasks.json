@@ -186,7 +186,6 @@
       "errorExecutorRequiresProvider": "Cross-executor spawn requires provider + model. Use the `cdesktop team spawn` CLI for this.",
       "errorNameInvalid": "Name is empty, too long, or contains newlines.",
       "errorWorkspaceArchived": "Cannot spawn teammates in an archived workspace.",
-      "errorNotLead": "Only the lead session can spawn teammates from the CLI.",
       "successToast": "Teammate '{{name}}' spawned",
       "renameAction": "Rename",
       "deleteAction": "Delete",

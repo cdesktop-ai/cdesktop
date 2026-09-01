@@ -1,10 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
-import {
-  CheckIcon,
-  GitBranchIcon,
-  SpinnerIcon,
-} from '@phosphor-icons/react';
+import { CheckIcon, GitBranchIcon, SpinnerIcon } from '@phosphor-icons/react';
 import type { GitBranch, Repo } from 'shared/types';
 import { repoApi } from '@/shared/lib/api';
 import {

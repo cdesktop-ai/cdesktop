@@ -7,5 +7,7 @@ pub mod executors;
 pub mod logs;
 pub mod mcp_config;
 pub mod model_selector;
+pub mod outcome;
 pub mod profile;
+pub mod provider;
 pub mod stdout_dup;

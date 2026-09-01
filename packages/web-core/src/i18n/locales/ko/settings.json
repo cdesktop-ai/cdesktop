@@ -21,6 +21,8 @@
         "reposDesc": "폴더 스크립트 및 구성",
         "agents": "에이전트",
         "agentsDesc": "코딩 에이전트 구성",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "mcp": "MCP 서버",
         "mcpDesc": "Model Context Protocol 서버",
         "organizations": "Organization Settings",
@@ -196,6 +198,17 @@
         "customPrompt": {
           "useCustom": "사용자 정의 프롬프트 사용",
           "helper": "커밋 알림용 사용자 정의 프롬프트. git 상태가 자동으로 추가됩니다."
+        }
+      },
+      "workspaces": {
+        "title": "워크스페이스",
+        "description": "워크스페이스 정리 방식을 설정합니다",
+        "autoArchive": {
+          "label": "유휴 워크스페이스 보관",
+          "helper": "실행 중이거나 고정된 상태가 아니며 최근 활동이 없는 워크스페이스를 자동으로 보관합니다. 보관된 워크스페이스는 보관 필터에서 계속 사용할 수 있고 Git 브랜치는 유지됩니다.",
+          "idleLabel": "보관 전 유휴 시간",
+          "idleHelper": "워크스페이스가 보관되기 전에 유휴 상태로 있어야 하는 기간입니다.",
+          "days": "{{days}}일"
         }
       },
       "notifications": {

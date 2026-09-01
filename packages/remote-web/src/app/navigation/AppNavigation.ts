@@ -165,6 +165,9 @@ function destinationToRemoteTarget(
         } as const;
       }
       return { to: "/" } as const;
+    case "agents":
+      // The remote surface has no Agents view yet; land on the host root.
+      return { to: "/" } as const;
     case "export":
       return { to: "/export" } as const;
     case "project":
@@ -234,6 +237,7 @@ export function createRemoteHostAppNavigation(hostId: string): AppNavigation {
       navigateTo({ kind: "onboarding" }, transition),
     goToOnboardingSignIn: (transition) =>
       navigateTo({ kind: "onboarding-sign-in" }, transition),
+    goToAgents: (transition) => navigateTo({ kind: "agents" }, transition),
     goToWorkspaces: (transition) =>
       navigateTo({ kind: "workspaces", hostId }, transition),
     goToWorkspacesCreate: (transition) =>
@@ -306,6 +310,7 @@ function createRemoteFallbackAppNavigation(): AppNavigation {
       navigateTo({ kind: "onboarding" }, transition),
     goToOnboardingSignIn: (transition) =>
       navigateTo({ kind: "onboarding-sign-in" }, transition),
+    goToAgents: (transition) => navigateTo({ kind: "agents" }, transition),
     goToWorkspaces: (transition) =>
       navigateTo({ kind: "workspaces" }, transition),
     goToWorkspacesCreate: (transition) =>

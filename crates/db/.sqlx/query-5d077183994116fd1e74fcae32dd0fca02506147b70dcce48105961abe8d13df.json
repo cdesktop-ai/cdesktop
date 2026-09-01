@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE sessions SET\n                name = CASE WHEN $1 THEN $2 ELSE name END,\n                parent_session_id = CASE WHEN $3 THEN $4 ELSE parent_session_id END,\n                updated_at = datetime('now', 'subsec')\n            WHERE id = $5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "5d077183994116fd1e74fcae32dd0fca02506147b70dcce48105961abe8d13df"
+}

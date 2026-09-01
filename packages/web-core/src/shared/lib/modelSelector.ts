@@ -68,7 +68,8 @@ export function parseModelId(
 
 export function appendPresetModel(
   config: ModelSelectorConfig | null,
-  presetModel: string | null | undefined
+  presetModel: string | null | undefined,
+  reasoningOptions: ReasoningOption[] = []
 ): ModelSelectorConfig | null {
   if (!config || !presetModel) return config;
   const hasProviders = config.providers.length > 0;
@@ -89,7 +90,7 @@ export function appendPresetModel(
         id: modelId,
         name: modelId,
         provider_id: providerId,
-        reasoning_options: [],
+        reasoning_options: reasoningOptions,
       },
       ...config.models,
     ],

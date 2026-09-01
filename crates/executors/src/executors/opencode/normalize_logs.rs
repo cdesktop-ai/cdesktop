@@ -32,6 +32,28 @@ use crate::{
     },
 };
 
+fn now_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Render a `session.status` retry for the activity feed.
+///
+/// `next` is the wall-clock instant OpenCode will retry at, not a delay, so it
+/// is only meaningful as a countdown from now. A `next` already in the past
+/// means the retry is imminent.
+fn retry_message(attempt: u64, message: &str, next: u64, now: u64) -> String {
+    let seconds = next.saturating_sub(now).div_ceil(1000);
+    let when = if seconds == 0 {
+        "retrying now".to_string()
+    } else {
+        format!("retrying in {seconds}s")
+    };
+    format!("OpenCode retry (attempt {attempt}): {message} ({when})")
+}
+
 fn system_message(content: String) -> NormalizedEntry {
     NormalizedEntry {
         timestamp: None,
@@ -347,8 +369,11 @@ impl LogState {
                 }
                 self.retry_status_fingerprint = Some(fingerprint);
 
-                self.add_normalized_entry(system_message(format!(
-                    "OpenCode retry (attempt {attempt}): {message} (next in {next}ms)"
+                self.add_normalized_entry(system_message(retry_message(
+                    attempt,
+                    &message,
+                    next,
+                    now_epoch_millis(),
                 )));
             }
             SessionStatus::Idle | SessionStatus::Busy | SessionStatus::Other => {}
@@ -1564,4 +1589,65 @@ fn parse_question_items(items: &[Value]) -> Vec<AskUserQuestionItem> {
         .filter_map(|v| serde_json::from_value(v.clone()).ok())
         .collect();
     parse_question_items_from_info(&infos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executors::opencode::types::SessionStatus;
+
+    fn fixture(name: &str) -> Value {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/executors/opencode/fixtures")
+                .join(name),
+        )
+        .expect("fixture readable");
+        serde_json::from_str(&raw).expect("fixture is valid JSON")
+    }
+
+    fn retry_status(name: &str) -> SessionStatus {
+        serde_json::from_value(fixture(name)["status"].clone()).expect("status parses")
+    }
+
+    #[test]
+    fn throttled_and_overloaded_turns_both_parse_as_retries() {
+        // Both are live captures: HTTP 429 and HTTP 503 from the provider.
+        // OpenCode retries them internally rather than failing the turn, so the
+        // only thing that reaches us is this status.
+        for name in [
+            "session_status_retry_rate_limit.json",
+            "session_status_retry_overloaded.json",
+        ] {
+            assert!(
+                matches!(retry_status(name), SessionStatus::Retry { .. }),
+                "{name} did not parse as a retry"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_countdown_is_relative_to_now_not_the_raw_timestamp() {
+        let SessionStatus::Retry {
+            attempt,
+            message,
+            next,
+        } = retry_status("session_status_retry_rate_limit.json")
+        else {
+            panic!("fixture is a retry");
+        };
+
+        // `next` is epoch milliseconds; the capture retried ~20s out.
+        let rendered = retry_message(attempt, &message, next, next - 20_000);
+
+        assert!(rendered.contains("retrying in 20s"), "{rendered}");
+        assert!(!rendered.contains(&next.to_string()), "{rendered}");
+    }
+
+    #[test]
+    fn retry_deadline_already_passed_reads_as_imminent() {
+        let rendered = retry_message(3, "Provider is overloaded", 1_787_442_019_535, u64::MAX);
+
+        assert!(rendered.contains("retrying now"), "{rendered}");
+    }
 }

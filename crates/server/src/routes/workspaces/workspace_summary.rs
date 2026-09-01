@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+};
 
 use axum::{Json, extract::State, response::Json as ResponseJson};
 use db::models::{
@@ -11,16 +14,74 @@ use db::models::{
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 use utils::response::ApiResponse;
 use uuid::Uuid;
 
 use crate::{DeploymentImpl, error::ApiError};
 
+static GIT_REFRESH_SEMAPHORE: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(1)));
+static GIT_REFRESHES: LazyLock<Mutex<HashMap<Uuid, (Uuid, CancellationToken)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Only queued refreshes are superseded. Once Git is running it is deliberately
+/// allowed to finish under the single global permit rather than being killed.
+struct RefreshClaim {
+    workspace_id: Uuid,
+    generation: Uuid,
+    cancellation: CancellationToken,
+}
+impl RefreshClaim {
+    fn replace(workspace_id: Uuid) -> Self {
+        let cancellation = CancellationToken::new();
+        let generation = Uuid::new_v4();
+        let mut refreshes = GIT_REFRESHES.lock().expect("git refresh lock poisoned");
+        if let Some((_, previous)) =
+            refreshes.insert(workspace_id, (generation, cancellation.clone()))
+        {
+            previous.cancel();
+        }
+        Self {
+            workspace_id,
+            generation,
+            cancellation,
+        }
+    }
+    async fn acquire(&self) -> Option<OwnedSemaphorePermit> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => None,
+            permit = GIT_REFRESH_SEMAPHORE.clone().acquire_owned() => permit.ok(),
+        }
+    }
+}
+impl Drop for RefreshClaim {
+    fn drop(&mut self) {
+        let mut refreshes = GIT_REFRESHES.lock().expect("git refresh lock poisoned");
+        if refreshes
+            .get(&self.workspace_id)
+            .is_some_and(|(generation, _)| generation == &self.generation)
+        {
+            refreshes.remove(&self.workspace_id);
+        }
+    }
+}
+
 /// Request for fetching workspace summaries
 #[derive(Debug, Deserialize, Serialize, TS)]
 pub struct WorkspaceSummaryRequest {
     pub archived: bool,
+    /// Git truth is opt-in and strictly task-local; fleet lists are metadata-only.
+    #[serde(default)]
+    pub include_git: bool,
+    #[serde(default)]
+    pub refresh_workspace_id: Option<Uuid>,
 }
 
 /// Summary info for a single workspace
@@ -118,27 +179,30 @@ pub async fn get_workspace_summaries(
     // 6b. Primary repo per workspace (drives sidebar folder grouping)
     let primary_repos = WorkspaceRepo::find_primary_repos_for_archived(pool, archived).await?;
 
-    // 7. Compute diff stats for each workspace (in parallel)
-    let diff_futures: Vec<_> = workspaces
-        .iter()
-        .map(|ws| {
-            let workspace = ws.clone();
-            let deployment = deployment.clone();
-            async move {
-                if workspace.container_ref.is_some() {
-                    compute_workspace_diff_stats(&deployment, &workspace)
-                        .await
-                        .map(|stats| (workspace.id, stats))
-                } else {
-                    None
-                }
+    // 7. The default list never observes Git. A caller may explicitly refresh
+    // one non-archived, running workspace; terminal and archived rows are
+    // filtered before any refresh claim is created.
+    let diff_stats = if request.include_git && !archived {
+        match request
+            .refresh_workspace_id
+            .and_then(|id| workspaces.iter().find(|workspace| workspace.id == id))
+        {
+            Some(workspace)
+                if workspace.container_ref.is_some()
+                    && latest_processes.get(&workspace.id).is_some_and(|process| {
+                        process.status == ExecutionProcessStatus::Running
+                    }) =>
+            {
+                compute_workspace_diff_stats(&deployment, workspace)
+                    .await
+                    .map(|stats| HashMap::from([(workspace.id, stats)]))
+                    .unwrap_or_default()
             }
-        })
-        .collect();
-
-    let diff_results: Vec<Option<(Uuid, DiffStats)>> =
-        futures_util::future::join_all(diff_futures).await;
-    let diff_stats: HashMap<Uuid, DiffStats> = diff_results.into_iter().flatten().collect();
+            _ => HashMap::new(),
+        }
+    } else {
+        HashMap::new()
+    };
 
     // 8. Assemble response
     let summaries: Vec<WorkspaceSummary> = workspaces
@@ -180,6 +244,11 @@ pub async fn compute_workspace_diff_stats(
     deployment: &DeploymentImpl,
     workspace: &Workspace,
 ) -> Option<DiffStats> {
+    let claim = RefreshClaim::replace(workspace.id);
+    let _permit = claim.acquire().await?;
+    if claim.cancellation.is_cancelled() {
+        return None;
+    }
     let stats = services::services::diff_stream::compute_diff_stats(
         &deployment.db().pool,
         deployment.git(),
@@ -192,4 +261,30 @@ pub async fn compute_workspace_diff_stats(
         lines_added: stats.lines_added,
         lines_removed: stats.lines_removed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_summary_is_metadata_only_even_for_a_large_live_fleet() {
+        let request = WorkspaceSummaryRequest {
+            archived: false,
+            include_git: false,
+            refresh_workspace_id: None,
+        };
+        assert!(!request.include_git);
+        // The selection predicate is false before a workspace refresh future can exist.
+        assert!(!(request.include_git && !request.archived));
+    }
+
+    #[tokio::test]
+    async fn queued_refresh_is_cancelled_when_superseded() {
+        let id = Uuid::new_v4();
+        let first = RefreshClaim::replace(id);
+        let _second = RefreshClaim::replace(id);
+        assert!(first.cancellation.is_cancelled());
+        assert!(first.acquire().await.is_none());
+    }
 }

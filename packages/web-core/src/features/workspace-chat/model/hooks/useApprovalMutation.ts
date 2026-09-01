@@ -1,10 +1,12 @@
 import { useMutation } from '@tanstack/react-query';
 import { approvalsApi } from '@/shared/lib/api';
-import type { QuestionAnswer } from 'shared/types';
+import type { ApprovalScope, QuestionAnswer } from 'shared/types';
 
 interface ApproveParams {
   approvalId: string;
   executionProcessId: string;
+  /** Defaults to a one-shot approval. */
+  scope?: ApprovalScope;
 }
 
 interface DenyParams extends ApproveParams {
@@ -17,10 +19,10 @@ interface AnswerParams extends ApproveParams {
 
 export function useApprovalMutation() {
   const approveMutation = useMutation({
-    mutationFn: ({ approvalId, executionProcessId }: ApproveParams) =>
+    mutationFn: ({ approvalId, executionProcessId, scope }: ApproveParams) =>
       approvalsApi.respond(approvalId, {
         execution_process_id: executionProcessId,
-        status: { status: 'approved' },
+        status: { status: 'approved', scope: scope ?? 'once' },
       }),
     onError: (err) => {
       console.error('Failed to approve:', err);

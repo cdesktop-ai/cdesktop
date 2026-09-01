@@ -4,7 +4,10 @@ use axum::{
     response::{IntoResponse, Json as ResponseJson},
     routing::get,
 };
-use db::models::scratch::{CreateScratch, Scratch, ScratchType, UpdateScratch};
+use db::models::{
+    scratch::{CreateScratch, Scratch, ScratchType, UpdateScratch},
+    session_command::SessionCommand,
+};
 use deployment::Deployment;
 use futures_util::{StreamExt, TryStreamExt};
 use serde::Deserialize;
@@ -48,7 +51,7 @@ pub async fn create_scratch(
 ) -> Result<ResponseJson<ApiResponse<Scratch>>, ApiError> {
     // Reject edits to draft_follow_up if a message is queued for this workspace
     if matches!(scratch_type, ScratchType::DraftFollowUp)
-        && deployment.queued_message_service().has_queued(id)
+        && SessionCommand::has_pending(&deployment.db().pool, id).await?
     {
         return Err(ApiError::BadRequest(
             "Cannot edit scratch while a message is queued".to_string(),
@@ -72,7 +75,7 @@ pub async fn update_scratch(
 ) -> Result<ResponseJson<ApiResponse<Scratch>>, ApiError> {
     // Reject edits to draft_follow_up if a message is queued for this workspace
     if matches!(scratch_type, ScratchType::DraftFollowUp)
-        && deployment.queued_message_service().has_queued(id)
+        && SessionCommand::has_pending(&deployment.db().pool, id).await?
     {
         return Err(ApiError::BadRequest(
             "Cannot edit scratch while a message is queued".to_string(),

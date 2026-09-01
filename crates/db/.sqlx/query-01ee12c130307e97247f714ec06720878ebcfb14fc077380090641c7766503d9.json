@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT wr.workspace_id as \"workspace_id!: Uuid\",\n                      r.id             as \"repo_id!: Uuid\",\n                      r.name,\n                      r.display_name,\n                      r.path\n               FROM workspace_repos wr\n               JOIN repos r      ON r.id = wr.repo_id\n               JOIN workspaces w ON w.id = wr.workspace_id\n               WHERE w.archived = $1\n               ORDER BY wr.workspace_id, r.display_name ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "workspace_id!: Uuid",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "repo_id!: Uuid",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "name",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "display_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "path",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "01ee12c130307e97247f714ec06720878ebcfb14fc077380090641c7766503d9"
+}

@@ -87,7 +87,8 @@
     "emptyDescription": "La conversación de tu sesión aparecerá aquí cuando comience un nuevo turno.",
     "toolName": {
       "Skill": "Habilidad"
-    }
+    },
+    "spawnInstructions": "Instrucciones de creación"
   },
   "changesPanel": {
     "notGitRepo": "No es un repositorio Git — sin diff disponible"
@@ -599,10 +600,7 @@
       "prFilterLabel": "PR",
       "prFilterAll": "All",
       "prFilterHasPr": "Has PR",
-      "prFilterNoPr": "No PR",
-      "noProject": "No project",
-      "sortButtonTitle": "Sort sesiones",
-      "filterButtonTitle": "Filter sesiones"
+      "prFilterNoPr": "No PR"
     },
     "sortAscending": "Ascending",
     "sortDescending": "Descending",
@@ -931,6 +929,11 @@
     },
     "sidebar": {
       "nav": "Rutinas"
+    }
+  },
+  "agents": {
+    "sidebar": {
+      "nav": "Agents"
     }
   }
 }

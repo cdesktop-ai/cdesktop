@@ -25,6 +25,18 @@ fn default_relay_enabled() -> bool {
     true
 }
 
+fn default_auto_archive_enabled() -> bool {
+    true
+}
+
+/// Kept above the 72-hour worktree retention window so auto-archive never
+/// shortens how long an idle worktree survives on disk.
+pub const MIN_AUTO_ARCHIVE_IDLE_DAYS: u32 = 3;
+
+fn default_auto_archive_idle_days() -> u32 {
+    7
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, TS, PartialEq, Eq)]
 pub enum SendMessageShortcut {
     ModifierEnter,
@@ -68,6 +80,12 @@ pub struct Config {
     pub relay_enabled: bool,
     #[serde(default)]
     pub host_nickname: Option<String>,
+    /// Archive workspaces that have gone idle, so they stop accumulating.
+    #[serde(default = "default_auto_archive_enabled")]
+    pub auto_archive_enabled: bool,
+    /// Idle days before an unpinned, not-running workspace is archived.
+    #[serde(default = "default_auto_archive_idle_days")]
+    pub auto_archive_idle_days: u32,
 }
 
 impl Config {
@@ -106,6 +124,8 @@ impl Config {
             send_message_shortcut: SendMessageShortcut::default(),
             relay_enabled: true,
             host_nickname: None,
+            auto_archive_enabled: default_auto_archive_enabled(),
+            auto_archive_idle_days: default_auto_archive_idle_days(),
         }
     }
 
@@ -162,6 +182,8 @@ impl Default for Config {
             send_message_shortcut: SendMessageShortcut::default(),
             relay_enabled: true,
             host_nickname: None,
+            auto_archive_enabled: default_auto_archive_enabled(),
+            auto_archive_idle_days: default_auto_archive_idle_days(),
         }
     }
 }

@@ -55,6 +55,8 @@ import { WorkspacesSidebarContainer } from '@/pages/workspaces/WorkspacesSidebar
 import { WorkspacesSidebarReopenTag } from '@vibe/ui/components/WorkspacesSidebar';
 import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
 import { CloudShutdownExportBanner } from '@/shared/components/CloudShutdownExportBanner';
+import { SightMeshUpdateBanner } from '@/shared/components/SightMeshUpdateBanner';
+import { useSightMeshUpdateStatus } from '@/shared/hooks/useSightMeshUpdateStatus';
 import { SHOW_CLOUD_APPBAR } from '@/shared/lib/cdesktopFlags';
 
 export function SharedAppLayout() {
@@ -74,9 +76,9 @@ export function SharedAppLayout() {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isAppBarHovered, setIsAppBarHovered] = useState(false);
   const { hosts: remoteCloudHosts } = useRemoteCloudHostsAppBarModel();
+  const { data: sightMeshUpdate } = useSightMeshUpdateStatus();
   const { hostId: routeHostId } = useParams({ strict: false });
   const navigate = useNavigate();
-
   // Register CMD+K shortcut globally for all routes under SharedAppLayout
   useCommandBarShortcut(() => CommandBarDialog.show());
 
@@ -176,6 +178,13 @@ export function SharedAppLayout() {
   const isExportActive = currentDestination?.kind === 'export';
   const showCloudShutdownBanner =
     isExportActive || (isSignedIn && isProjectDestination(currentDestination));
+  const showSightMeshUpdateBanner = Boolean(
+    sightMeshUpdate &&
+      ['staged', 'waiting-for-idle', 'activating', 'failed'].includes(
+        sightMeshUpdate.status
+      )
+  );
+  const showAnyBanner = showCloudShutdownBanner || showSightMeshUpdateBanner;
   const isWorkspaceSidebarPreviewEnabled =
     !isMobile && isWorkspacesActive && !isLeftSidebarVisible;
   const activeProjectId = projectDestination?.projectId ?? null;
@@ -309,15 +318,20 @@ export function SharedAppLayout() {
                 SHOW_CLOUD_APPBAR ? 'grid-cols-[auto_1fr]' : 'grid-cols-1',
                 // Top navbar is hidden (sidebar carries its actions); when
                 // visible, banner gets an auto row above the 1fr content row.
-                showCloudShutdownBanner ? 'grid-rows-[auto_1fr]' : 'grid-rows-1'
+                showAnyBanner ? 'grid-rows-[auto_1fr]' : 'grid-rows-1'
               )
         )}
       >
         {!isMobile && (
           <>
-            {showCloudShutdownBanner && (
+            {showAnyBanner && (
               <div className={SHOW_CLOUD_APPBAR ? 'col-span-2' : 'col-span-1'}>
-                <CloudShutdownExportBanner onClick={handleExportClick} />
+                {showCloudShutdownBanner && (
+                  <CloudShutdownExportBanner onClick={handleExportClick} />
+                )}
+                {showSightMeshUpdateBanner && sightMeshUpdate && (
+                  <SightMeshUpdateBanner update={sightMeshUpdate} />
+                )}
               </div>
             )}
             {SHOW_CLOUD_APPBAR && (
@@ -412,6 +426,9 @@ export function SharedAppLayout() {
           <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
             {showCloudShutdownBanner && (
               <CloudShutdownExportBanner onClick={handleExportClick} />
+            )}
+            {showSightMeshUpdateBanner && sightMeshUpdate && (
+              <SightMeshUpdateBanner update={sightMeshUpdate} />
             )}
             <NavbarContainer
               mobileMode={isMobile}

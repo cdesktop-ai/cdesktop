@@ -18,7 +18,9 @@ use tokio::{
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
-use workspace_utils::approvals::{ApprovalStatus, QuestionAnswer, QuestionStatus};
+use workspace_utils::approvals::{
+    ApprovalPatterns, ApprovalScope, ApprovalStatus, QuestionAnswer, QuestionStatus,
+};
 
 use super::{
     slash_commands,
@@ -27,7 +29,13 @@ use super::{
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
     env::RepoContext,
-    executors::{ExecutorError, opencode::models::maybe_emit_token_usage},
+    executors::{
+        ExecutorError,
+        opencode::{
+            models::maybe_emit_token_usage,
+            outcome::{OutcomeSink, normalized_session_failure, transport_failure},
+        },
+    },
 };
 
 #[derive(Clone)]
@@ -94,6 +102,8 @@ pub(super) struct RunConfig {
     pub commit_reminder: bool,
     pub commit_reminder_prompt: String,
     pub repo_context: RepoContext,
+    /// Terminal outcome observed by the event listener, read by the spawn task.
+    pub outcome: OutcomeSink,
 }
 
 /// Generate a cryptographically secure random password for OpenCode server auth.
@@ -310,6 +320,7 @@ async fn run_session_inner(
             pending_approvals: pending_approvals.clone(),
             models_cache_key: config.models_cache_key.clone(),
             cancel: cancel.clone(),
+            outcome: config.outcome.clone(),
         },
         event_resp,
     ));
@@ -418,22 +429,38 @@ pub(super) fn build_authenticated_client(
     build_opencode_client(directory, password)
 }
 
+/// Bounds the short control requests only; anything model-paced opts out with
+/// `OPENCODE_LONG_REQUEST_TIMEOUT`.
+const OPENCODE_HTTP_TIMEOUT: Duration = Duration::from_secs(180);
+
 fn build_opencode_client(
     directory: &str,
     password: &str,
 ) -> Result<reqwest::Client, ExecutorError> {
-    const OPENCODE_HTTP_TIMEOUT: Duration = Duration::from_secs(180);
+    build_opencode_client_with_timeout(directory, password, OPENCODE_HTTP_TIMEOUT)
+}
+
+fn build_opencode_client_with_timeout(
+    directory: &str,
+    password: &str,
+    request_timeout: Duration,
+) -> Result<reqwest::Client, ExecutorError> {
     const OPENCODE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
     reqwest::Client::builder()
         .default_headers(build_default_headers(directory, password))
         .connect_timeout(OPENCODE_CONNECT_TIMEOUT)
-        .timeout(OPENCODE_HTTP_TIMEOUT)
+        .timeout(request_timeout)
         .build()
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))
 }
 
-const OPENCODE_PROMPT_TIMEOUT: Duration = Duration::from_hours(24 * 7);
+/// Applied to requests whose duration is bounded by the model rather than by
+/// the network: a prompt, and the event stream that carries its result. The
+/// client-wide timeout below is a *total* request timeout in reqwest, so
+/// leaving it in force would cut a long turn's event stream mid-flight and
+/// strand the run waiting for a `session.idle` it can no longer receive.
+const OPENCODE_LONG_REQUEST_TIMEOUT: Duration = Duration::from_hours(24 * 7);
 
 fn append_session_error(session_error: &mut Option<String>, message: String) {
     match session_error {
@@ -642,7 +669,7 @@ async fn prompt(
     let resp = client
         .post(format!("{base_url}/session/{session_id}/message"))
         .query(&[("directory", directory)])
-        .timeout(OPENCODE_PROMPT_TIMEOUT)
+        .timeout(OPENCODE_LONG_REQUEST_TIMEOUT)
         .json(&req)
         .send()
         .await
@@ -737,7 +764,7 @@ pub(super) async fn session_command(
     let resp = client
         .post(format!("{base_url}/session/{session_id}/command"))
         .query(&[("directory", directory)])
-        .timeout(OPENCODE_PROMPT_TIMEOUT)
+        .timeout(OPENCODE_LONG_REQUEST_TIMEOUT)
         .json(&req)
         .send()
         .await
@@ -816,7 +843,7 @@ pub(super) async fn session_summarize(
     let resp = client
         .post(format!("{base_url}/session/{session_id}/summarize"))
         .query(&[("directory", directory)])
-        .timeout(OPENCODE_PROMPT_TIMEOUT)
+        .timeout(OPENCODE_LONG_REQUEST_TIMEOUT)
         .json(&req)
         .send()
         .await
@@ -1107,6 +1134,7 @@ pub(super) async fn connect_event_stream(
     let mut req = client
         .get(format!("{base_url}/event"))
         .header(reqwest::header::ACCEPT, "text/event-stream")
+        .timeout(OPENCODE_LONG_REQUEST_TIMEOUT)
         .query(&[("directory", directory)]);
 
     if let Some(last_event_id) = last_event_id {
@@ -1144,6 +1172,7 @@ pub(super) struct EventListenerConfig {
     pub pending_approvals: PendingApprovals,
     pub models_cache_key: String,
     pub cancel: CancellationToken,
+    pub outcome: OutcomeSink,
 }
 
 pub(super) async fn spawn_event_listener(
@@ -1162,6 +1191,7 @@ pub(super) async fn spawn_event_listener(
         pending_approvals,
         models_cache_key,
         cancel,
+        outcome,
     } = config;
 
     let mut seen_permissions: HashSet<String> = HashSet::new();
@@ -1191,6 +1221,7 @@ pub(super) async fn spawn_event_listener(
                             .await;
                         attempt += 1;
                         if attempt >= max_attempts {
+                            outcome.record(transport_failure());
                             let _ = control_tx.send(ControlEvent::Disconnected);
                             return;
                         }
@@ -1202,7 +1233,7 @@ pub(super) async fn spawn_event_listener(
             }
         };
 
-        let outcome = process_event_stream(
+        let stream_outcome = process_event_stream(
             EventStreamContext {
                 seen_permissions: &mut seen_permissions,
                 client: &client,
@@ -1218,12 +1249,13 @@ pub(super) async fn spawn_event_listener(
                 last_event_id: &mut last_event_id,
                 models_cache_key: &models_cache_key,
                 cancel: cancel.clone(),
+                outcome: &outcome,
             },
             current_resp,
         )
         .await;
 
-        match outcome {
+        match stream_outcome {
             Ok(EventStreamOutcome::Idle) => {
                 // Keep listening - there may be more prompts (e.g., commit reminder)
                 // The task will be aborted by event_handle.abort() when done
@@ -1234,6 +1266,7 @@ pub(super) async fn spawn_event_listener(
             Ok(EventStreamOutcome::Disconnected) | Err(_) => {
                 attempt += 1;
                 if attempt >= max_attempts {
+                    outcome.record(transport_failure());
                     let _ = control_tx.send(ControlEvent::Disconnected);
                     return;
                 }
@@ -1276,6 +1309,7 @@ pub(super) struct EventStreamContext<'a> {
     /// Cache key for model context windows, derived from config that affects available models.
     pub models_cache_key: &'a str,
     cancel: CancellationToken,
+    outcome: &'a OutcomeSink,
 }
 
 async fn process_event_stream(
@@ -1354,6 +1388,10 @@ async fn process_event_stream(
                 return Ok(EventStreamOutcome::Idle);
             }
             "session.error" => {
+                ctx.outcome.record(normalized_session_failure(
+                    data.pointer("/properties/error"),
+                ));
+
                 let error_type = data
                     .pointer("/properties/error/name")
                     .or_else(|| data.pointer("/properties/error/type"))
@@ -1519,6 +1557,8 @@ async fn process_event_stream(
                     .unwrap_or("tool")
                     .to_string();
 
+                let patterns = permission_patterns(&data);
+
                 let approvals = ctx.approvals.clone();
                 let client = ctx.client.clone();
                 let base_url = ctx.base_url.to_string();
@@ -1532,6 +1572,7 @@ async fn process_event_stream(
                         auto_approve,
                         approvals.clone(),
                         &permission,
+                        patterns,
                     )
                     .await
                     {
@@ -1541,7 +1582,9 @@ async fn process_event_stream(
                             log_approval_response(
                                 &log_writer,
                                 &tool_call_id,
-                                ApprovalStatus::Approved,
+                                ApprovalStatus::Approved {
+                                    scope: ApprovalScope::Once,
+                                },
                             )
                             .await;
 
@@ -1597,43 +1640,7 @@ async fn process_event_stream(
 
                     log_approval_response(&log_writer, &tool_call_id, status.clone()).await;
 
-                    let (reply, message) = match status {
-                        ApprovalStatus::Approved => ("once", None),
-                        ApprovalStatus::Denied { reason } => {
-                            let msg = reason
-                                .unwrap_or_else(|| "User denied this tool use request".to_string())
-                                .trim()
-                                .to_string();
-                            let msg = if msg.is_empty() {
-                                "User denied this tool use request".to_string()
-                            } else {
-                                msg
-                            };
-                            ("reject", Some(msg))
-                        }
-                        ApprovalStatus::TimedOut => (
-                            "reject",
-                            Some(
-                                "Approval request timed out; proceed without using this tool call."
-                                    .to_string(),
-                            ),
-                        ),
-                        ApprovalStatus::Pending => (
-                            "reject",
-                            Some(
-                                "Approval request could not be completed; proceed without using this tool call."
-                                    .to_string(),
-                            ),
-                        ),
-                    };
-
-                    // If we reject without a message, OpenCode treats it as a hard stop.
-                    // Provide a message so the agent can continue with guidance.
-                    let payload = if reply == "reject" {
-                        serde_json::json!({ "reply": reply, "message": message.unwrap_or_else(|| "User denied this tool use request".to_string()) })
-                    } else {
-                        serde_json::json!({ "reply": reply })
-                    };
+                    let payload = permission_reply_body(&status);
 
                     let _ = client
                         .post(format!("{base_url}/permission/{request_id}/reply"))
@@ -1728,6 +1735,73 @@ async fn log_question_response(log_writer: &LogWriter, tool_call_id: &str, statu
         .await;
 }
 
+/// Message sent back with a rejection. OpenCode treats a `reject` with no
+/// message as a hard stop, so every denial carries guidance the agent can act
+/// on instead of ending the turn.
+const DENIED_MESSAGE: &str = "User denied this tool use request";
+
+/// Read the scope out of a `permission.asked` event.
+///
+/// `patterns` is the command being asked about; `always` is the rule
+/// `reply: "always"` installs for the rest of the session. They are different
+/// widths - a `bash` ask for `echo w2-first` carries `always: ["echo *"]` - so
+/// both reach the operator rather than the narrower one standing in for both.
+fn permission_patterns(event: &Value) -> ApprovalPatterns {
+    ApprovalPatterns {
+        request: string_list(event, "/properties/patterns"),
+        session: string_list(event, "/properties/always"),
+    }
+}
+
+fn string_list(event: &Value, pointer: &str) -> Vec<String> {
+    event
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Map an operator decision onto the body of `POST /permission/{id}/reply`.
+///
+/// `always` is OpenCode's own session-scoped grant: it installs the request's
+/// `always` patterns as a rule, so nothing has to be echoed back with it. That
+/// rule is exactly as wide as what the operator was shown - verified live on
+/// 1.15.10: `always` on a `bash` ask carrying `always: ["echo *"]` let a later
+/// `echo` through untouched and still stopped a later `ls`.
+fn permission_reply_body(status: &ApprovalStatus) -> Value {
+    match status {
+        ApprovalStatus::Approved {
+            scope: ApprovalScope::Once,
+        } => serde_json::json!({ "reply": "once" }),
+        ApprovalStatus::Approved {
+            scope: ApprovalScope::Session,
+        } => serde_json::json!({ "reply": "always" }),
+        ApprovalStatus::Denied { reason } => {
+            reject_body(reason.as_deref().unwrap_or(DENIED_MESSAGE))
+        }
+        ApprovalStatus::TimedOut => {
+            reject_body("Approval request timed out; proceed without using this tool call.")
+        }
+        ApprovalStatus::Pending => reject_body(
+            "Approval request could not be completed; proceed without using this tool call.",
+        ),
+    }
+}
+
+fn reject_body(message: &str) -> Value {
+    let message = match message.trim() {
+        "" => DENIED_MESSAGE,
+        trimmed => trimmed,
+    };
+    serde_json::json!({ "reply": "reject", "message": message })
+}
+
 struct ApprovalCreated {
     approval_id: String,
 }
@@ -1736,6 +1810,7 @@ async fn create_permission_approval(
     auto_approve: bool,
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
     tool_name: &str,
+    patterns: ApprovalPatterns,
 ) -> Result<Option<ApprovalCreated>, ExecutorApprovalError> {
     if auto_approve {
         return Ok(None);
@@ -1745,7 +1820,7 @@ async fn create_permission_approval(
         return Ok(None);
     };
 
-    match approvals.create_tool_approval(tool_name).await {
+    match approvals.create_tool_approval(tool_name, patterns).await {
         Ok(approval_id) => Ok(Some(ApprovalCreated { approval_id })),
         Err(
             ExecutorApprovalError::ServiceUnavailable | ExecutorApprovalError::SessionNotRegistered,
@@ -1760,7 +1835,9 @@ async fn wait_permission_approval(
     cancel: CancellationToken,
 ) -> Result<ApprovalStatus, ExecutorApprovalError> {
     let Some(approvals) = approvals else {
-        return Ok(ApprovalStatus::Approved);
+        return Ok(ApprovalStatus::Approved {
+            scope: ApprovalScope::Once,
+        });
     };
 
     approvals.wait_tool_approval(approval_id, cancel).await
@@ -1811,4 +1888,184 @@ fn answers_to_opencode_format(questions: &[Value], answers: &[QuestionAnswer]) -
                 })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use serde_json::json;
+    use workspace_utils::approvals::{ApprovalScope, ApprovalStatus};
+
+    use super::{permission_patterns, permission_reply_body};
+
+    /// Verbatim `permission.asked` frames from a live `opencode serve`
+    /// (1.15.10). See `fixtures/README.md`.
+    const ECHO_ASK: &str = include_str!("fixtures/permission_asked_bash_echo.json");
+    const LS_ASK: &str = include_str!("fixtures/permission_asked_bash_ls.json");
+
+    fn patterns_of(fixture: &str) -> workspace_utils::approvals::ApprovalPatterns {
+        permission_patterns(&serde_json::from_str(fixture).expect("fixture parses"))
+    }
+
+    #[test]
+    fn session_scope_is_wider_than_the_command_being_asked_about() {
+        let echo = patterns_of(ECHO_ASK);
+        assert_eq!(echo.request, vec!["echo w2-first".to_string()]);
+        assert_eq!(echo.session, vec!["echo *".to_string()]);
+
+        let ls = patterns_of(LS_ASK);
+        assert_eq!(ls.request, vec!["ls -la".to_string()]);
+        assert_eq!(ls.session, vec!["ls *".to_string()]);
+    }
+
+    #[test]
+    fn opencode_always_offers_a_session_scope_on_every_ask() {
+        for fixture in [ECHO_ASK, LS_ASK] {
+            assert!(!patterns_of(fixture).is_once_only());
+        }
+    }
+
+    #[test]
+    fn an_event_without_scope_degrades_to_once_only() {
+        let patterns = permission_patterns(&json!({"properties": {"permission": "bash"}}));
+        assert!(patterns.request.is_empty());
+        assert!(patterns.is_once_only());
+    }
+
+    #[test]
+    fn scope_selects_the_reply_verb() {
+        assert_eq!(
+            permission_reply_body(&ApprovalStatus::Approved {
+                scope: ApprovalScope::Once
+            }),
+            json!({"reply": "once"})
+        );
+        assert_eq!(
+            permission_reply_body(&ApprovalStatus::Approved {
+                scope: ApprovalScope::Session
+            }),
+            json!({"reply": "always"})
+        );
+    }
+
+    #[test]
+    fn every_refusal_carries_a_message() {
+        let refusals = [
+            ApprovalStatus::Denied {
+                reason: Some("not this one".to_string()),
+            },
+            ApprovalStatus::Denied {
+                reason: Some("   ".to_string()),
+            },
+            ApprovalStatus::Denied { reason: None },
+            ApprovalStatus::TimedOut,
+            ApprovalStatus::Pending,
+        ];
+
+        for status in refusals {
+            let body = permission_reply_body(&status);
+            assert_eq!(body["reply"], "reject");
+            let message = body["message"].as_str().expect("reject carries a message");
+            assert!(!message.trim().is_empty(), "empty message for {status:?}");
+        }
+    }
+
+    #[test]
+    fn a_denial_reason_reaches_the_agent_verbatim() {
+        let body = permission_reply_body(&ApprovalStatus::Denied {
+            reason: Some("  use the test fixture instead  ".to_string()),
+        });
+        assert_eq!(body["message"], "use the test fixture instead");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use super::{build_opencode_client_with_timeout, connect_event_stream};
+
+    /// An OpenCode server that accepts an SSE subscription and then says nothing
+    /// for `quiet`, the way it does while a model is thinking.
+    async fn quiet_sse_server(quiet: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = socket.read(&mut [0u8; 2048]).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\n\
+                              Content-Type: text/event-stream\r\n\
+                              Transfer-Encoding: chunked\r\n\r\n",
+                        )
+                        .await;
+                    let _ = socket.flush().await;
+                    tokio::time::sleep(quiet).await;
+                    let event = "data: {\"type\":\"session.idle\"}\n\n";
+                    let chunk = format!("{:x}\r\n{event}\r\n", event.len());
+                    let _ = socket.write_all(chunk.as_bytes()).await;
+                    let _ = socket.write_all(b"0\r\n\r\n").await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_event_stream_outlives_the_client_request_timeout() {
+        // A turn is paced by the model, not the network. reqwest's client
+        // timeout is a *total* request timeout, so left in force it severs the
+        // stream mid-turn and the run waits forever for a `session.idle` it can
+        // no longer receive. Scaled down here: a client that gives up after
+        // 300ms, against a server quiet for 900ms.
+        let quiet = Duration::from_millis(900);
+        let base_url = quiet_sse_server(quiet).await;
+        let client =
+            build_opencode_client_with_timeout("/tmp", "password", Duration::from_millis(300))
+                .expect("client builds");
+
+        let mut response = connect_event_stream(&client, &base_url, "/tmp", None)
+            .await
+            .expect("subscribing to the event stream");
+
+        let event = tokio::time::timeout(quiet * 3, response.chunk())
+            .await
+            .expect("the stream must not be cut by the client timeout")
+            .expect("reading the event that arrived after the timeout would have fired")
+            .expect("the stream ended without delivering the event");
+
+        assert!(
+            String::from_utf8_lossy(&event).contains("session.idle"),
+            "the event published after the client timeout never arrived"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_request_still_honours_the_client_timeout() {
+        // The exemption is scoped to the stream: control requests stay bounded,
+        // so a wedged server cannot stall the executor indefinitely.
+        let base_url = quiet_sse_server(Duration::from_secs(30)).await;
+        let client =
+            build_opencode_client_with_timeout("/tmp", "password", Duration::from_millis(300))
+                .expect("client builds");
+
+        let result = client.get(format!("{base_url}/config")).send().await;
+
+        match result {
+            Err(err) => assert!(err.is_timeout(), "expected a timeout, got {err}"),
+            Ok(response) => {
+                let body = response.bytes().await;
+                assert!(body.is_err(), "a quiet control request must time out");
+            }
+        }
+    }
 }

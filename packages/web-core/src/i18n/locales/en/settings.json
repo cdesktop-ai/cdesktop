@@ -25,6 +25,8 @@
         "reposDesc": "Folder scripts and configuration",
         "agents": "Agents",
         "agentsDesc": "Coding agent configurations",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "providers": "Providers",
         "providersDesc": "AI provider routing and model selection",
         "mcp": "MCP Servers",
@@ -204,6 +206,17 @@
         "customPrompt": {
           "useCustom": "Use custom prompt",
           "helper": "Custom prompt for the commit reminder. The git status will be appended automatically."
+        }
+      },
+      "workspaces": {
+        "title": "Workspaces",
+        "description": "Configure how workspaces are retired",
+        "autoArchive": {
+          "label": "Archive idle workspaces",
+          "helper": "Automatically archive workspaces that are not running, not pinned, and have seen no activity. Archived workspaces stay available under the archive filter, and their Git branches are preserved.",
+          "idleLabel": "Idle before archiving",
+          "idleHelper": "How long a workspace must sit idle before it is archived.",
+          "days": "{{days}} days"
         }
       },
       "notifications": {

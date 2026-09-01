@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT w.id AS \"id!: Uuid\"\n            FROM workspaces w\n            WHERE w.archived = FALSE\n              AND w.pin_order IS NULL\n              AND NOT EXISTS (\n                  SELECT 1\n                  FROM sessions s\n                  JOIN execution_processes ep ON ep.session_id = s.id\n                  WHERE s.workspace_id = w.id\n                    AND ep.completed_at IS NULL\n              )\n              AND datetime('now', $1) > (\n                  SELECT MAX(activity)\n                  FROM (\n                      SELECT datetime(w.updated_at) AS activity\n                      UNION ALL\n                      SELECT datetime(ep.completed_at)\n                      FROM sessions s\n                      JOIN execution_processes ep ON ep.session_id = s.id\n                      WHERE s.workspace_id = w.id\n                        AND ep.completed_at IS NOT NULL\n                  )\n              )\n            ORDER BY w.updated_at ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: Uuid",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "2d43526a10006b6a710fde77387f09e883cf762aee6325be3d5bd50fed686dc1"
+}

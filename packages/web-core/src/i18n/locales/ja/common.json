@@ -87,7 +87,8 @@
     "emptyDescription": "新しいターンが始まると、ワークスペースの会話がここに表示されます。",
     "toolName": {
       "Skill": "スキル"
-    }
+    },
+    "spawnInstructions": "起動時の指示"
   },
   "changesPanel": {
     "notGitRepo": "Git リポジトリではありません — 差分はありません"
@@ -238,6 +239,7 @@
   },
   "turnNavigation": {
     "title": "あなたのメッセージ",
+    "count_one": "{{count}} ターン",
     "count_other": "{{count}} ターン"
   },
   "commandBar": {
@@ -598,10 +600,7 @@
       "prFilterLabel": "PR",
       "prFilterAll": "All",
       "prFilterHasPr": "Has PR",
-      "prFilterNoPr": "No PR",
-      "noProject": "No project",
-      "sortButtonTitle": "Sort セッション",
-      "filterButtonTitle": "Filter セッション"
+      "prFilterNoPr": "No PR"
     },
     "sortAscending": "Ascending",
     "sortDescending": "Descending",
@@ -930,6 +929,11 @@
     },
     "sidebar": {
       "nav": "ルーティン"
+    }
+  },
+  "agents": {
+    "sidebar": {
+      "nav": "Agents"
     }
   }
 }

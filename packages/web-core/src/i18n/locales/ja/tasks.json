@@ -515,7 +515,6 @@
       "errorExecutorRequiresProvider": "異なるエグゼキュータでの作成にはプロバイダーとモデルが必要です。CLI `cdesktop team spawn` を使用してください。",
       "errorNameInvalid": "名前が空、長すぎる、または改行を含んでいます。",
       "errorWorkspaceArchived": "アーカイブ済みワークスペースではチームメイトを作成できません。",
-      "errorNotLead": "CLIからチームメイトを作成できるのはリードセッションのみです。",
       "successToast": "チームメイト「{{name}}」を作成しました",
       "renameAction": "名前を変更",
       "deleteAction": "削除",

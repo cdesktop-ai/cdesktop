@@ -161,6 +161,7 @@ function renderRowContent(
       <DisplayConversationEntry
         expansionKey={entry.patchKey}
         entry={entry.content}
+        promptKind={entry.promptKind}
         aggregatedGroup={null}
         aggregatedDiffGroup={null}
         aggregatedThinkingGroup={null}

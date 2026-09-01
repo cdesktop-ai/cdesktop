@@ -191,36 +191,36 @@ export function CreateChatBox<TExecutor extends string = string>({
       chipRow={chipRow}
       headerLeft={
         hasHeaderLeftContent ? (
-        <>
-          {agentIcon}
-          {executor.options.length > 1 && (
-            <ToolbarDropdown label={executorLabel} disabled={isDisabled}>
-              <DropdownMenuLabel>
-                {t('tasks:conversation.executors')}
-              </DropdownMenuLabel>
-              {executor.options.map((exec) => (
-                <DropdownMenuItem
-                  key={exec}
-                  icon={executor.selected === exec ? CheckIcon : undefined}
-                  onClick={() => executor.onChange(exec)}
-                >
-                  {formatExecutorLabel(exec)}
-                </DropdownMenuItem>
-              ))}
-            </ToolbarDropdown>
-          )}
-          {saveAsDefault?.visible && (
-            <label className="flex items-center gap-1.5 text-sm text-low cursor-pointer ml-2">
-              <Checkbox
-                checked={saveAsDefault.checked}
-                onCheckedChange={saveAsDefault.onChange}
-                className="h-3.5 w-3.5"
-                disabled={isDisabled}
-              />
-              <span>{t('tasks:conversation.saveAsDefault')}</span>
-            </label>
-          )}
-        </>
+          <>
+            {agentIcon}
+            {executor.options.length > 1 && (
+              <ToolbarDropdown label={executorLabel} disabled={isDisabled}>
+                <DropdownMenuLabel>
+                  {t('tasks:conversation.executors')}
+                </DropdownMenuLabel>
+                {executor.options.map((exec) => (
+                  <DropdownMenuItem
+                    key={exec}
+                    icon={executor.selected === exec ? CheckIcon : undefined}
+                    onClick={() => executor.onChange(exec)}
+                  >
+                    {formatExecutorLabel(exec)}
+                  </DropdownMenuItem>
+                ))}
+              </ToolbarDropdown>
+            )}
+            {saveAsDefault?.visible && (
+              <label className="flex items-center gap-1.5 text-sm text-low cursor-pointer ml-2">
+                <Checkbox
+                  checked={saveAsDefault.checked}
+                  onCheckedChange={saveAsDefault.onChange}
+                  className="h-3.5 w-3.5"
+                  disabled={isDisabled}
+                />
+                <span>{t('tasks:conversation.saveAsDefault')}</span>
+              </label>
+            )}
+          </>
         ) : undefined
       }
       footerLeft={

@@ -1,7 +1,7 @@
 {
   "name": "cdesktop",
   "private": false,
-  "version": "0.2.3",
+  "version": "0.2.7",
   "main": "index.js",
   "bin": {
     "cdesktop": "bin/cli.js"
@@ -14,18 +14,18 @@
   "author": "cdesktop",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cdesktop-ai/cdesktop"
+    "url": "https://github.com/clarkipeng/cdesktop"
   },
   "engines": {
     "node": ">=20.19.0"
   },
   "license": "Apache-2.0",
-  "description": "NPX wrapper around cdesktop and cdesktop-mcp",
+  "description": "SightMesh-compatible local build of cdesktop and cdesktop-mcp",
   "devDependencies": {
-    "esbuild": "^0.27.2"
+    "esbuild": "^0.28.1"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.0",
     "cac": "^7.0.0"
   },
   "files": [

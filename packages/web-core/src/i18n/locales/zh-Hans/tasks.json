@@ -497,7 +497,6 @@
       "errorExecutorRequiresProvider": "跨执行器创建需要提供商 + 模型。请使用 CLI `cdesktop team spawn`。",
       "errorNameInvalid": "名称为空、过长或包含换行符。",
       "errorWorkspaceArchived": "无法在已归档的工作区中创建队友。",
-      "errorNotLead": "只有主会话才能从 CLI 创建队友。",
       "successToast": "已创建队友 '{{name}}'",
       "renameAction": "重命名",
       "deleteAction": "删除",

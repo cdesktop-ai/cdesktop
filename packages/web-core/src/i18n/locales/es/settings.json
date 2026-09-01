@@ -21,6 +21,8 @@
         "reposDesc": "Scripts y configuración de carpetas",
         "agents": "Agentes",
         "agentsDesc": "Configuraciones de agentes",
+        "execution-routing": "Execution Routing",
+        "execution-routingDesc": "Subscription-first route policy",
         "mcp": "Servidores MCP",
         "mcpDesc": "Servidores de Protocolo de Contexto de Modelo (MCP)",
         "organizations": "Organization Settings",
@@ -196,6 +198,17 @@
         "customPrompt": {
           "useCustom": "Usar prompt personalizado",
           "helper": "Prompt personalizado para el recordatorio de commit. El estado de git se añadirá automáticamente."
+        }
+      },
+      "workspaces": {
+        "title": "Espacios de trabajo",
+        "description": "Configura cómo se retiran los espacios de trabajo",
+        "autoArchive": {
+          "label": "Archivar espacios inactivos",
+          "helper": "Archiva automáticamente los espacios que no se estén ejecutando, no estén fijados y no hayan tenido actividad. Los espacios archivados siguen disponibles en el filtro de archivo y se conservan sus ramas de Git.",
+          "idleLabel": "Tiempo inactivo antes de archivar",
+          "idleHelper": "Tiempo que un espacio debe permanecer inactivo antes de archivarse.",
+          "days": "{{days}} días"
         }
       },
       "notifications": {
