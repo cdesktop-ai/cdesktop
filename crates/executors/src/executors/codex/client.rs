@@ -20,10 +20,10 @@ use codex_app_server_protocol::{
     JSONRPCRequest, JSONRPCResponse, ListMcpServerStatusParams, ListMcpServerStatusResponse,
     McpServerStatusDetail, RequestId, ReviewStartParams, ReviewStartResponse, ReviewTarget,
     ServerRequest, ThreadCompactStartParams, ThreadCompactStartResponse, ThreadForkParams,
-    ThreadForkResponse, ThreadItem, ThreadReadParams, ThreadReadResponse, ThreadStartParams,
-    ThreadStartResponse, ToolRequestUserInputAnswer, ToolRequestUserInputQuestion,
-    ToolRequestUserInputResponse, TurnCompletedNotification, TurnStartParams, TurnStartResponse,
-    TurnStatus, UserInput,
+    ThreadForkResponse, ThreadItem, ThreadReadParams, ThreadReadResponse, ThreadResumeParams,
+    ThreadResumeResponse, ThreadStartParams, ThreadStartResponse, ToolRequestUserInputAnswer,
+    ToolRequestUserInputQuestion, ToolRequestUserInputResponse, TurnCompletedNotification,
+    TurnStartParams, TurnStartResponse, TurnStatus, UserInput,
 };
 use codex_protocol::config_types::{CollaborationMode, ModeKind, Settings};
 use futures::TryFutureExt;
@@ -174,6 +174,23 @@ impl AppServerClient {
         let response: ThreadForkResponse = self.send_request(request, "thread/fork").await?;
         reservation.commit();
         Ok(response)
+    }
+
+    /// Resume the recorded thread after the same admission check used for a
+    /// fresh start. Unlike a fork, this creates no rollout-history copy.
+    pub async fn thread_resume(
+        &self,
+        params: ThreadResumeParams,
+    ) -> Result<ThreadResumeResponse, ExecutorError> {
+        self.storage_limits
+            .ensure_start_allowed()
+            .await
+            .map_err(ExecutorError::Io)?;
+        let request = ClientRequest::ThreadResume {
+            request_id: self.next_request_id(),
+            params,
+        };
+        self.send_request(request, "thread/resume").await
     }
 
     /// Turn a fork refusal into a typed terminal. A rate-limited refusal is
@@ -1091,6 +1108,7 @@ fn request_id(request: &ClientRequest) -> RequestId {
     match request {
         ClientRequest::Initialize { request_id, .. }
         | ClientRequest::ThreadStart { request_id, .. }
+        | ClientRequest::ThreadResume { request_id, .. }
         | ClientRequest::ThreadFork { request_id, .. }
         | ClientRequest::TurnStart { request_id, .. }
         | ClientRequest::GetAccount { request_id, .. }

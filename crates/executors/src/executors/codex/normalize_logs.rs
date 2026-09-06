@@ -381,6 +381,7 @@ struct LogState {
     plans: HashMap<String, PlanState>,
     review: Option<ReviewState>,
     model_params: ModelParamsState,
+    token_usage: HashMap<String, usize>,
 }
 
 struct ModelParamsState {
@@ -413,6 +414,7 @@ impl LogState {
                 model: None,
                 reasoning_effort: None,
             },
+            token_usage: HashMap::new(),
         }
     }
 
@@ -742,34 +744,42 @@ fn upsert_dynamic_tool_state(
     replace_normalized_entry(msg_store, index, dynamic_tool_state.to_normalized_entry());
 }
 
-fn add_thread_token_usage(
+fn upsert_thread_token_usage(
     notification: ThreadTokenUsageUpdatedNotification,
+    state: &mut LogState,
     msg_store: &Arc<MsgStore>,
     entry_index: &EntryIndexProvider,
 ) {
-    add_normalized_entry(
-        msg_store,
-        entry_index,
-        NormalizedEntry {
-            timestamp: None,
-            entry_type: NormalizedEntryType::TokenUsageInfo(crate::logs::TokenUsageInfo {
-                total_tokens: notification.token_usage.last.total_tokens as u32,
-                model_context_window: notification
-                    .token_usage
-                    .model_context_window
-                    .unwrap_or_default() as u32,
-            }),
-            content: format!(
-                "Tokens used: {} / Context window: {}",
-                notification.token_usage.last.total_tokens,
-                notification
-                    .token_usage
-                    .model_context_window
-                    .unwrap_or_default()
-            ),
-            metadata: None,
-        },
-    );
+    let key = format!("{}:{}", notification.thread_id, notification.turn_id);
+    let entry = NormalizedEntry {
+        timestamp: None,
+        entry_type: NormalizedEntryType::TokenUsageInfo(crate::logs::TokenUsageInfo {
+            total_tokens: notification.token_usage.last.total_tokens as u32,
+            model_context_window: notification
+                .token_usage
+                .model_context_window
+                .unwrap_or_default() as u32,
+        }),
+        content: format!(
+            "Tokens used: {} / Context window: {}",
+            notification.token_usage.last.total_tokens,
+            notification
+                .token_usage
+                .model_context_window
+                .unwrap_or_default()
+        ),
+        metadata: Some(serde_json::json!({
+            "thread_id": notification.thread_id,
+            "turn_id": notification.turn_id,
+        })),
+    };
+
+    if let Some(index) = state.token_usage.get(&key) {
+        replace_normalized_entry(msg_store, *index, entry);
+    } else {
+        let index = add_normalized_entry(msg_store, entry_index, entry);
+        state.token_usage.insert(key, index);
+    }
 }
 
 trait QuestionLike {
@@ -1305,7 +1315,7 @@ fn handle_direct_notification(
             true
         }
         ServerNotification::ThreadTokenUsageUpdated(notification) => {
-            add_thread_token_usage(notification, msg_store, entry_index);
+            upsert_thread_token_usage(notification, state, msg_store, entry_index);
             true
         }
         ServerNotification::AgentMessageDelta(notification) => {
@@ -2864,5 +2874,66 @@ mod tests {
             }
             other => panic!("unexpected dynamic tool entry: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn token_usage_is_attributed_to_its_turn_and_updates_in_place() {
+        let token_usage = |turn_id: &str, total_tokens: u64| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": turn_id,
+                    "tokenUsage": {
+                        "total": {
+                            "totalTokens": total_tokens,
+                            "inputTokens": total_tokens,
+                            "cachedInputTokens": 0,
+                            "outputTokens": 0,
+                            "reasoningOutputTokens": 0
+                        },
+                        "last": {
+                            "totalTokens": total_tokens,
+                            "inputTokens": total_tokens,
+                            "cachedInputTokens": 0,
+                            "outputTokens": 0,
+                            "reasoningOutputTokens": 0
+                        },
+                        "modelContextWindow": 1000
+                    }
+                }
+            })
+            .to_string()
+        };
+
+        let entries = normalize_lines(&[
+            token_usage("turn-old", 10),
+            token_usage("turn-new", 20),
+            token_usage("turn-new", 30),
+        ])
+        .await;
+
+        let usage: Vec<_> = entries
+            .iter()
+            .filter(|entry| matches!(entry.entry_type, NormalizedEntryType::TokenUsageInfo(_)))
+            .collect();
+        assert_eq!(usage.len(), 2, "an update must not replay old usage");
+        assert!(usage.iter().any(|entry| {
+            entry.content == "Tokens used: 10 / Context window: 1000"
+                && entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|value| value.get("turn_id"))
+                    == Some(&json!("turn-old"))
+        }));
+        assert!(usage.iter().any(|entry| {
+            entry.content == "Tokens used: 30 / Context window: 1000"
+                && entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|value| value.get("turn_id"))
+                    == Some(&json!("turn-new"))
+        }));
     }
 }

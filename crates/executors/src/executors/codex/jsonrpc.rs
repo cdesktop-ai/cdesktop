@@ -313,3 +313,25 @@ pub trait JsonRpcCallbacks: Send + Sync {
         ExecutorExitResult::Success
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_leaves_the_request_outcome_unknown_for_reconciliation() {
+        let (_sender, receiver) = oneshot::channel();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = await_response::<serde_json::Value>(receiver, "turn/start", cancel)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("turn/start request cancelled"));
+        // `await_response` returns rather than retrying, so the command owner
+        // can reconcile this unknown send outcome before any later submission.
+    }
+}

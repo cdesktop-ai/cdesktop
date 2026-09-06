@@ -48,10 +48,35 @@ pub(crate) fn fork_params_from(thread_id: String, params: ThreadStartParams) -> 
     }
 }
 
+/// Carry the effective launch configuration into a native continuation.
+///
+/// `thread/resume` reopens the recorded thread in place. It deliberately does
+/// not supply `history` or `path`: both can select a different source of
+/// history, while the recorded thread id is the one authoritative identity.
+pub(crate) fn resume_params_from(
+    thread_id: String,
+    params: ThreadStartParams,
+) -> ThreadResumeParams {
+    ThreadResumeParams {
+        thread_id,
+        model: params.model,
+        model_provider: params.model_provider,
+        cwd: params.cwd,
+        approval_policy: params.approval_policy,
+        sandbox: params.sandbox,
+        config: params.config,
+        base_instructions: params.base_instructions,
+        developer_instructions: params.developer_instructions,
+        service_tier: params.service_tier,
+        ..Default::default()
+    }
+}
+
 use async_trait::async_trait;
 use codex_app_server_protocol::{
-    AskForApproval as V2AskForApproval, ReviewTarget, SandboxMode as V2SandboxMode,
-    ThreadForkParams, ThreadStartParams, UserInput,
+    AskForApproval as V2AskForApproval, ClientRequest, RequestId, ReviewTarget,
+    SandboxMode as V2SandboxMode, ThreadForkParams, ThreadResumeParams, ThreadStartParams,
+    TurnStartParams, UserInput,
 };
 use derivative::Derivative;
 use schemars::JsonSchema;
@@ -602,9 +627,16 @@ impl Codex {
             approval_policy,
             sandbox,
             config,
+            // `append_prompt` is persistent executor guidance, not new user
+            // input. It belongs in the native developer-instructions layer:
+            // setting base instructions here would replace the model's
+            // default base instructions when no explicit base is configured.
             base_instructions: self.base_instructions.clone(),
             model_provider,
-            developer_instructions: self.developer_instructions.clone(),
+            developer_instructions: join_developer_instructions(
+                self.developer_instructions.as_deref(),
+                self.append_prompt.get().as_deref(),
+            ),
             service_tier,
             ..Default::default()
         }
@@ -691,22 +723,13 @@ impl Codex {
                 (response.thread.id, response.model)
             }
             Some(session_id) => {
-                // Fork is the codex app-server's only resume primitive, and it
-                // materializes a copy of the prior rollout inside the codex
-                // binary (cdesktop cannot reference history in place).
-                //
-                // The storage guard (`ensure_fork_allowed`) only *limits* that
-                // copying: a per-rollout size cap, a free-disk reserve and a
-                // process-global fork-rate breaker. It does not garbage-collect
-                // rollouts, does not deduplicate history, and does not make an
-                // over-cap session resumable - such a session is refused, not
-                // recovered. The real fix is rollout GC plus content-addressed
-                // history: clarkipeng/cdesktop#29, upstream
-                // cdesktop-ai/cdesktop#16.
+                // An ordinary follow-up continues the recorded native thread.
+                // Branch and review paths keep using `thread/fork`, where the
+                // new thread identity is the isolation boundary.
                 let response = client
-                    .thread_fork(fork_params_from(session_id, thread_start_params))
+                    .thread_resume(resume_params_from(session_id, thread_start_params))
                     .await?;
-                tracing::debug!("forked thread, new thread_id={}", response.thread.id);
+                tracing::debug!("resumed thread, thread_id={}", response.thread.id);
                 (response.thread.id, response.model)
             }
         };
@@ -870,5 +893,225 @@ impl Codex {
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
         })
+    }
+}
+
+fn join_developer_instructions(configured: Option<&str>, appended: Option<&str>) -> Option<String> {
+    match (configured, appended) {
+        (Some(configured), Some(appended)) => Some(format!("{configured}\n{appended}")),
+        (Some(configured), None) => Some(configured.to_string()),
+        (None, Some(appended)) => Some(appended.to_string()),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+
+    #[test]
+    fn resume_uses_the_recorded_thread_without_copying_history() {
+        let params = ThreadStartParams {
+            model: Some("gpt-test".to_string()),
+            cwd: Some("/tmp/cdesktop".to_string()),
+            approval_policy: Some(V2AskForApproval::Never),
+            sandbox: Some(V2SandboxMode::WorkspaceWrite),
+            config: Some(HashMap::from([("x".to_string(), Value::Bool(true))])),
+            base_instructions: Some("stable guidance".to_string()),
+            developer_instructions: Some("developer guidance".to_string()),
+            service_tier: Some(Some("fast".to_string())),
+            ..Default::default()
+        };
+
+        let resume = resume_params_from("thread-1".to_string(), params);
+
+        assert_eq!(resume.thread_id, "thread-1");
+        assert!(resume.history.is_none());
+        assert!(resume.path.is_none());
+        assert_eq!(resume.cwd.as_deref(), Some("/tmp/cdesktop"));
+        assert_eq!(resume.base_instructions.as_deref(), Some("stable guidance"));
+        assert_eq!(
+            resume.developer_instructions.as_deref(),
+            Some("developer guidance")
+        );
+    }
+
+    #[test]
+    fn append_guidance_preserves_default_base_instructions_at_the_protocol_seam() {
+        let codex = codex_with_guidance(None, None, Some("changed guidance"));
+        let params = codex.build_thread_start_params(&std::env::temp_dir(), &test_env());
+        let request = ClientRequest::ThreadStart {
+            request_id: RequestId::Integer(1),
+            params,
+        };
+        let encoded = serde_json::to_value(request).unwrap();
+
+        assert!(encoded["params"]["baseInstructions"].is_null());
+        assert_eq!(
+            encoded["params"]["developerInstructions"],
+            "changed guidance"
+        );
+
+        let explicit_base = codex_with_guidance(None, Some("explicit base"), Some("guidance"))
+            .build_thread_start_params(&std::env::temp_dir(), &test_env());
+        assert_eq!(
+            explicit_base.base_instructions.as_deref(),
+            Some("explicit base")
+        );
+    }
+
+    #[test]
+    fn changed_and_cleared_append_guidance_are_reflected_in_resume_params() {
+        let original = codex_with_guidance(
+            Some("configured developer guidance"),
+            None,
+            Some("original guidance"),
+        );
+        let original_params = resume_params_from(
+            "thread-1".to_string(),
+            original.build_thread_start_params(&std::env::temp_dir(), &test_env()),
+        );
+        assert_eq!(
+            original_params.developer_instructions.as_deref(),
+            Some("configured developer guidance\noriginal guidance")
+        );
+
+        let changed = codex_with_guidance(
+            Some("configured developer guidance"),
+            None,
+            Some("changed guidance"),
+        );
+        let changed_params = resume_params_from(
+            "thread-1".to_string(),
+            changed.build_thread_start_params(&std::env::temp_dir(), &test_env()),
+        );
+        let changed_request = serde_json::to_value(ClientRequest::ThreadResume {
+            request_id: RequestId::Integer(1),
+            params: changed_params,
+        })
+        .unwrap();
+        assert_eq!(
+            changed_request["params"]["developerInstructions"],
+            "configured developer guidance\nchanged guidance"
+        );
+
+        let cleared = codex_with_guidance(Some("configured developer guidance"), None, None);
+        let cleared_params = resume_params_from(
+            "thread-1".to_string(),
+            cleared.build_thread_start_params(&std::env::temp_dir(), &test_env()),
+        );
+        let cleared_request = serde_json::to_value(ClientRequest::ThreadResume {
+            request_id: RequestId::Integer(2),
+            params: cleared_params,
+        })
+        .unwrap();
+        assert_eq!(
+            cleared_request["params"]["developerInstructions"],
+            "configured developer guidance"
+        );
+        assert!(cleared_request["params"]["baseInstructions"].is_null());
+
+        let fully_cleared = codex_with_guidance(None, None, None);
+        let fully_cleared_params = resume_params_from(
+            "thread-1".to_string(),
+            fully_cleared.build_thread_start_params(&std::env::temp_dir(), &test_env()),
+        );
+        let fully_cleared_request = serde_json::to_value(ClientRequest::ThreadResume {
+            request_id: RequestId::Integer(3),
+            params: fully_cleared_params,
+        })
+        .unwrap();
+        assert!(fully_cleared_request["params"]["developerInstructions"].is_null());
+    }
+
+    fn codex_with_guidance(
+        developer_instructions: Option<&str>,
+        base_instructions: Option<&str>,
+        append_prompt: Option<&str>,
+    ) -> Codex {
+        Codex {
+            append_prompt: AppendPrompt(append_prompt.map(str::to_string)),
+            sandbox: None,
+            ask_for_approval: None,
+            oss: None,
+            model: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
+            model_reasoning_summary_format: None,
+            profile: None,
+            base_instructions: base_instructions.map(str::to_string),
+            include_apply_patch_tool: None,
+            model_provider: None,
+            compact_prompt: None,
+            developer_instructions: developer_instructions.map(str::to_string),
+            plan: false,
+            cmd: CmdOverrides::default(),
+            approvals: None,
+        }
+    }
+
+    fn test_env() -> ExecutionEnv {
+        ExecutionEnv::new(Default::default(), false, String::new())
+    }
+
+    #[test]
+    fn ordinary_continuations_emit_resume_then_a_new_turn_without_forking() {
+        let params = ThreadStartParams::default();
+        let mut methods = Vec::new();
+
+        for task in ["first continuation", "second continuation"] {
+            let resume = ClientRequest::ThreadResume {
+                request_id: RequestId::Integer(1),
+                params: resume_params_from("thread-1".to_string(), params.clone()),
+            };
+            let turn = ClientRequest::TurnStart {
+                request_id: RequestId::Integer(2),
+                params: TurnStartParams {
+                    thread_id: "thread-1".to_string(),
+                    input: vec![UserInput::Text {
+                        text: task.to_string(),
+                        text_elements: vec![],
+                    }],
+                    ..Default::default()
+                },
+            };
+            methods.push(serde_json::to_value(resume).unwrap());
+            methods.push(serde_json::to_value(turn).unwrap());
+        }
+
+        assert_eq!(
+            methods
+                .iter()
+                .map(|request| request["method"].as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("thread/resume"),
+                Some("turn/start"),
+                Some("thread/resume"),
+                Some("turn/start"),
+            ]
+        );
+        assert!(
+            methods
+                .iter()
+                .all(|request| request["method"] != "thread/fork")
+        );
+        assert!(
+            methods
+                .iter()
+                .all(|request| { request["params"]["threadId"] == "thread-1" })
+        );
+    }
+
+    #[test]
+    fn explicit_review_branch_still_emits_a_fork_request() {
+        let request = ClientRequest::ThreadFork {
+            request_id: RequestId::Integer(1),
+            params: fork_params_from("thread-1".to_string(), ThreadStartParams::default()),
+        };
+        let encoded = serde_json::to_value(request).unwrap();
+
+        assert_eq!(encoded["method"], "thread/fork");
+        assert_eq!(encoded["params"]["threadId"], "thread-1");
     }
 }

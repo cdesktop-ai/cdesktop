@@ -7,7 +7,7 @@ use serde_json::json;
 use super::{
     Codex,
     client::{AppServerClient, LogWriter},
-    fork_params_from, resolve_model,
+    resolve_model, resume_params_from,
     storage_guard::find_rollout_file,
 };
 use crate::{
@@ -127,9 +127,8 @@ impl Codex {
             Some(_) => self.build_command_builder()?.build_follow_up(&[])?,
             None => self.build_command_builder()?.build_initial()?,
         };
-        let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let action = super::CodexSessionAction::Chat {
-            prompt: combined_prompt,
+            prompt: prompt.to_string(),
         };
         self.spawn_inner(current_dir, command_parts, action, session_id, env)
             .await
@@ -158,11 +157,11 @@ impl Codex {
                         let old_thread_id = session_id.ok_or_else(|| {
                             ExecutorError::Io(std::io::Error::other("No active session to compact"))
                         })?;
-                        let fork_response = client
-                            .thread_fork(fork_params_from(old_thread_id, thread_start_params))
+                        let resume_response = client
+                            .thread_resume(resume_params_from(old_thread_id, thread_start_params))
                             .await?;
-                        let thread_id = fork_response.thread.id;
-                        tracing::debug!("forked thread for compact, new thread_id={thread_id}");
+                        let thread_id = resume_response.thread.id;
+                        tracing::debug!("resumed thread for compact, thread_id={thread_id}");
                         client.thread_compact_start(thread_id).await?;
                     }
                     CodexSlashCommand::Status => {
@@ -207,18 +206,6 @@ impl Codex {
                                 merge_strategy: MergeStrategy::Replace,
                             }])
                             .await;
-                        // Fork current session with new tier if one is active
-                        if let Some(old_thread_id) = session_id {
-                            let service_tier = if want_fast {
-                                Some(Some("fast".to_string()))
-                            } else {
-                                Some(None)
-                            };
-                            let mut fork_params =
-                                fork_params_from(old_thread_id, thread_start_params);
-                            fork_params.service_tier = service_tier;
-                            let _ = client.thread_fork(fork_params).await;
-                        }
                         let message = if want_fast {
                             "**Fast mode enabled.** Inference runs at higher speed (2× plan usage)."
                                 .to_string()
