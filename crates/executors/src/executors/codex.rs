@@ -439,7 +439,17 @@ impl Codex {
         apply_overrides(builder, &self.cmd)
     }
 
-    fn build_thread_start_params(&self, cwd: &Path, env: &ExecutionEnv) -> ThreadStartParams {
+    /// Builds the `thread/start` params. The working directory is deliberately
+    /// left unset: `spawn_app_server` already starts the app server with
+    /// `.current_dir(current_dir)`, and Codex falls back to its process cwd
+    /// (`thread/fork` falls back to the forked thread's recorded cwd). Sending
+    /// the host path explicitly breaks a `base_command_override` that runs
+    /// Codex somewhere the workspace lives at another path -- inside a Dev
+    /// Container, for example, where `/home/<user>/project` is mounted at
+    /// `/workspaces/project` -- because every `exec_command` then spawns in a
+    /// directory that does not exist there ("Failed to create unified exec
+    /// process: No such file or directory").
+    fn build_thread_start_params(&self, env: &ExecutionEnv) -> ThreadStartParams {
         let sandbox = match self.sandbox.as_ref() {
             None | Some(SandboxMode::Auto) => Some(V2SandboxMode::WorkspaceWrite), // match the Auto preset in codex
             Some(SandboxMode::ReadOnly) => Some(V2SandboxMode::ReadOnly),
@@ -515,7 +525,6 @@ impl Codex {
 
         ThreadStartParams {
             model: model.map(|m| m.to_string()),
-            cwd: Some(cwd.to_string_lossy().to_string()),
             approval_policy,
             sandbox,
             config,
@@ -568,7 +577,7 @@ impl Codex {
         resume_session: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let params = self.build_thread_start_params(current_dir, env);
+        let params = self.build_thread_start_params(env);
         let resume_session = resume_session.map(|s| s.to_string());
 
         self.spawn_app_server(
