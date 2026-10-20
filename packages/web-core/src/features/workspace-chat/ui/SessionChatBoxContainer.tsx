@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -15,6 +16,7 @@ import { useWorkspaceExecution } from '@/shared/hooks/useWorkspaceExecution';
 import { useWorkspaceRepo } from '@/shared/hooks/useWorkspaceRepo';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import WYSIWYGEditor from '@/shared/components/WYSIWYGEditor';
+import { VoiceInputButton } from '@/shared/components/VoiceInputButton';
 import { useApprovalFeedbackOptional } from '../model/contexts/ApprovalFeedbackContext';
 import { useMessageEditContext } from '../model/contexts/MessageEditContext';
 import { useEntries, useTokenUsage } from '../model/contexts/EntriesContext';
@@ -97,6 +99,15 @@ function computeExecutionStatus(params: {
   return 'idle';
 }
 
+type ResponseMode = 'call' | 'chat';
+
+function addResponseModeInstruction(prompt: string, mode: ResponseMode) {
+  if (mode === 'call') {
+    return `${prompt}\n\n[Réponds en phrases courtes, adaptées à une conversation orale.]`;
+  }
+  return `${prompt}\n\n[Réponds de façon détaillée et structurée, sauf si une réponse courte suffit.]`;
+}
+
 /** Shared props across all modes */
 interface SharedProps {
   /** Available sessions for this workspace */
@@ -152,6 +163,20 @@ type SessionChatBoxContainerProps =
   | PlaceholderProps;
 
 export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
+  const { t } = useTranslation('common');
+  const [responseMode, setResponseMode] = useState<ResponseMode>(() =>
+    (localStorage.getItem('freeclaude-response-mode') ??
+      localStorage.getItem('cdesktop-response-mode')) === 'call'
+      ? 'call'
+      : 'chat'
+  );
+  useEffect(() => {
+    localStorage.setItem('freeclaude-response-mode', responseMode);
+  }, [responseMode]);
+  const handledQuotaProcessIds = useRef(new Set<string>());
+  const quotaHistoryInitialized = useRef(false);
+  const quotaFailuresBySession = useRef(new Map<string, Set<string>>());
+  const [quotaNotice, setQuotaNotice] = useState<string | null>(null);
   const {
     mode,
     sessions,
@@ -238,8 +263,13 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
   }, [entries]);
 
   // Execution state
-  const { isAttemptRunning, stopExecution, isStopping, processes } =
-    useWorkspaceExecution(workspaceId);
+  const {
+    isAttemptRunning,
+    stopExecution,
+    isStopping,
+    processes,
+    isLoading: isExecutionLoading,
+  } = useWorkspaceExecution(workspaceId);
 
   // Approvals state
   const { getPendingForProcess } = useApprovals();
@@ -553,10 +583,171 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     selectedReasoningId,
   });
 
+  useEffect(() => {
+    if (isExecutionLoading) return;
+    if (!quotaHistoryInitialized.current) {
+      for (const process of processes) {
+        if (process.status !== ExecutionProcessStatus.running) {
+          handledQuotaProcessIds.current.add(process.id);
+        }
+      }
+      quotaHistoryInitialized.current = true;
+      return;
+    }
+    if (
+      !sessionId ||
+      !effectiveExecutor ||
+      isAttemptRunning ||
+      isSending ||
+      isStopping
+    ) {
+      return;
+    }
+
+    const failedProcess = [...processes]
+      .reverse()
+      .find(
+        (process) =>
+          process.run_reason === 'codingagent' &&
+          process.status === ExecutionProcessStatus.failed &&
+          !handledQuotaProcessIds.current.has(process.id)
+      );
+    if (!failedProcess) return;
+
+    const processEntries = entries.filter(
+      (entry) => entry.executionProcessId === failedProcess.id
+    );
+    const diagnosticText = processEntries
+      .filter(
+        (entry) =>
+          entry.type === 'STDERR' ||
+          (entry.type === 'NORMALIZED_ENTRY' &&
+            entry.content.entry_type.type === 'error_message')
+      )
+      .map((entry) => entry.content)
+      .join('\n');
+    const quotaFailure =
+      /\b429\b|rate.?limit|too many requests|quota|resource_exhausted|insufficient_quota|credits? exhausted/i.test(
+        diagnosticText
+      );
+    if (!quotaFailure) return;
+
+    handledQuotaProcessIds.current.add(failedProcess.id);
+    const failedModels =
+      quotaFailuresBySession.current.get(sessionId) ?? new Set();
+    if (selectedProviderId && selectedModelId) {
+      failedModels.add(`${selectedProviderId}/${selectedModelId}`);
+    }
+    quotaFailuresBySession.current.set(sessionId, failedModels);
+
+    const hasCredentialsForAgent = (provider: (typeof providers)[number]) => {
+      if (provider.kind === 'Default') return true;
+      if (provider.apiKey) return true;
+      switch (effectiveExecutor) {
+        case 'CLAUDE_CODE':
+          return !!provider.claude.apiKey;
+        case 'CODEX':
+          return !!provider.codex.apiKey;
+        case 'OPENCODE':
+          return !!provider.opencode.apiKey;
+        case 'GEMINI':
+          return !!provider.gemini.apiKey;
+        case 'HERMES':
+          return !!provider.hermes.apiKey;
+        case 'DEEPSEEK_TUI':
+          return !!provider.deepseekTui.apiKey;
+        default:
+          return false;
+      }
+    };
+
+    const fallback = (agentModelConfig?.models ?? [])
+      .filter((model) => !!model.provider_id)
+      .map((model) => {
+        const provider = providers.find(
+          (item) => item.id === model.provider_id
+        );
+        return provider ? { model, provider } : null;
+      })
+      .find(
+        (candidate) =>
+          !!candidate &&
+          candidate.provider.enabled &&
+          (candidate.provider.kind === 'Default' ||
+            candidate.provider.perAgentEnabled[effectiveExecutor] === true) &&
+          hasCredentialsForAgent(candidate.provider) &&
+          !failedModels.has(`${candidate.provider.id}/${candidate.model.id}`) &&
+          (candidate.provider.id !== selectedProviderId ||
+            candidate.model.id !== selectedModelId)
+      );
+
+    if (!fallback) {
+      setQuotaNotice(
+        'Le fournisseur a signalé une limite. Connecte un autre modèle dans Paramètres → Fournisseurs pour reprendre.'
+      );
+      return;
+    }
+
+    const lastRequest = [...processEntries]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.type === 'NORMALIZED_ENTRY' &&
+          entry.content.entry_type.type === 'user_message'
+      );
+    const handoffPrompt = [
+      'The previous model run stopped because its provider reported a rate or quota limit. Continue the same task in this session. The project files and completed edits are shared; inspect their current state and do not repeat completed work.',
+      lastRequest?.type === 'NORMALIZED_ENTRY'
+        ? `Original request: ${lastRequest.content.content}`
+        : '',
+      'The previous provider transcript and command diagnostics were not transferred. Review the shared project state to determine what is already complete; avoid repeating completed work.',
+      'First state briefly what is already complete and what remains, then continue the task.',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    const nextProviderId = fallback.provider.id;
+    const nextModelId = fallback.model.id;
+    setSelection(nextProviderId, nextModelId, null);
+    setQuotaNotice(
+      `Limite atteinte. Reprise avec ${fallback.provider.name} · ${fallback.model.name}… La demande initiale est transmise; les journaux restent locaux.`
+    );
+    void send(addResponseModeInstruction(handoffPrompt, responseMode), {
+      providerId: nextProviderId,
+      modelId: nextModelId,
+    }).then((success) => {
+      if (!success) {
+        setQuotaNotice(
+          `Le transfert vers ${fallback.provider.name} a échoué. Vérifie sa connexion puis relance la tâche.`
+        );
+      }
+    });
+  }, [
+    sessionId,
+    isExecutionLoading,
+    effectiveExecutor,
+    isAttemptRunning,
+    isSending,
+    isStopping,
+    processes,
+    entries,
+    agentModelConfig,
+    providers,
+    selectedModelId,
+    selectedProviderId,
+    selectedModelId,
+    setSelection,
+    send,
+    responseMode,
+  ]);
+
   const handleSend = useCallback(async () => {
-    const { prompt, isSlashCommand } = buildAgentPrompt(localMessage, [
-      reviewMarkdown,
-    ]);
+    const { prompt: basePrompt, isSlashCommand } = buildAgentPrompt(
+      localMessage,
+      [reviewMarkdown]
+    );
+    const prompt = isSlashCommand
+      ? basePrompt
+      : addResponseModeInstruction(basePrompt, responseMode);
 
     onScrollToBottom('auto');
 
@@ -595,6 +786,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     selectedProviderId,
     selectedModelId,
     preferredEffortId,
+    responseMode,
   ]);
 
   // Track previous process count for queue refresh
@@ -622,7 +814,10 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     // Allow queueing if there's a message OR review comments, and we have a config
     if ((!localMessage.trim() && !reviewMarkdown) || !executorConfig) return;
 
-    const { prompt } = buildAgentPrompt(localMessage, [reviewMarkdown]);
+    const { prompt: basePrompt } = buildAgentPrompt(localMessage, [
+      reviewMarkdown,
+    ]);
+    const prompt = addResponseModeInstruction(basePrompt, responseMode);
 
     // Picker is authoritative for model_id / reasoning_id — overlay before queue.
     const effectiveConfig = {
@@ -655,6 +850,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
     setLocalMessage,
     clearUploadedAttachments,
     reviewContext,
+    responseMode,
   ]);
 
   // Editor change handler
@@ -1002,41 +1198,78 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       onPasteFiles,
       localAttachments,
     }: SessionChatBoxEditorRenderProps<BaseCodingAgent>) => (
-      <WYSIWYGEditor
-        key={focusKey}
-        placeholder={placeholder}
-        value={value}
-        onChange={onChange}
-        onCmdEnter={onCmdEnter}
-        disabled={disabled}
-        className="min-h-double max-h-[50vh] overflow-y-auto"
-        repoIds={repoIds}
-        executor={executor}
-        sessionId={sessionId}
-        autoFocus
-        onPasteFiles={onPasteFiles}
-        localAttachments={localAttachments}
-        sendShortcut={config?.send_message_shortcut}
-      />
+      <div className="flex min-w-0 items-end gap-2">
+        <div className="min-w-0 flex-1">
+          <WYSIWYGEditor
+            key={focusKey}
+            placeholder={placeholder}
+            value={value}
+            onChange={onChange}
+            onCmdEnter={onCmdEnter}
+            disabled={disabled}
+            className="min-h-double max-h-[50vh] overflow-y-auto"
+            repoIds={repoIds}
+            executor={executor}
+            sessionId={sessionId}
+            autoFocus
+            onPasteFiles={onPasteFiles}
+            localAttachments={localAttachments}
+            sendShortcut={config?.send_message_shortcut}
+          />
+        </div>
+        {!disabled && onChange && (
+          <VoiceInputButton value={value} onChange={onChange} />
+        )}
+      </div>
     ),
     [config?.send_message_shortcut, sessionId]
   );
 
   const modelSelectorNode = effectiveExecutor ? (
-    <ProviderModelPicker
-      selectedProviderId={selectedProviderId}
-      selectedModelId={selectedModelId}
-      selectedReasoningId={selectedReasoningId}
-      preferredEffortId={preferredEffortId}
-      activeAgent={effectiveExecutor}
-      onManageProviders={() =>
-        SettingsDialog.show({ initialSection: 'providers' })
-      }
-      onSelectionChange={(providerId, modelId, reasoningId) =>
-        setSelection(providerId, modelId, reasoningId)
-      }
-      onPreferredEffortChange={setPreferredEffort}
-    />
+    <div className="flex items-center gap-2">
+      {quotaNotice && (
+        <span
+          role="status"
+          className="max-w-64 truncate text-xs text-amber-600 dark:text-amber-400"
+          title={quotaNotice}
+        >
+          {quotaNotice}
+        </span>
+      )}
+      <div
+        className="flex items-center rounded-md border p-0.5"
+        role="group"
+        aria-label={t('composer.responseMode.label')}
+      >
+        {(['call', 'chat'] as const).map((modeOption) => (
+          <button
+            key={modeOption}
+            type="button"
+            aria-pressed={responseMode === modeOption}
+            title={t(`composer.responseMode.${modeOption}Description`)}
+            aria-label={t(`composer.responseMode.${modeOption}Label`)}
+            onClick={() => setResponseMode(modeOption)}
+            className={`rounded px-2.5 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${responseMode === modeOption ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'}`}
+          >
+            {t(`composer.responseMode.${modeOption}`)}
+          </button>
+        ))}
+      </div>
+      <ProviderModelPicker
+        selectedProviderId={selectedProviderId}
+        selectedModelId={selectedModelId}
+        selectedReasoningId={selectedReasoningId}
+        preferredEffortId={preferredEffortId}
+        activeAgent={effectiveExecutor}
+        onManageProviders={() =>
+          SettingsDialog.show({ initialSection: 'providers' })
+        }
+        onSelectionChange={(providerId, modelId, reasoningId) =>
+          setSelection(providerId, modelId, reasoningId)
+        }
+        onPreferredEffortChange={setPreferredEffort}
+      />
+    </div>
   ) : undefined;
 
   const modelSelectorLeftNode = effectiveExecutor ? (

@@ -1,0 +1,45 @@
+name: Signaler un problème
+description: Décrire ce qui ne fonctionne pas pour qu’on puisse le reproduire.
+title: "[Problème] "
+labels: [bug, feedback]
+body:
+  - type: markdown
+    attributes:
+      value: Merci de préciser ce que vous avez essayé et ce qui s’est passé.
+  - type: input
+    id: version
+    attributes:
+      label: Version de FreeClaude Voice
+      placeholder: 0.2.3
+    validations:
+      required: false
+  - type: input
+    id: windows
+    attributes:
+      label: Version de Windows
+      placeholder: Windows 11 24H2
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ce que vous vouliez faire
+      description: Le résultat attendu.
+      placeholder: Je voulais…
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Ce qui s’est passé
+      description: Ce qui a fonctionné, ce qui a bloqué et les étapes pour reproduire.
+      placeholder: J’ai fait… puis…
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Autres remarques
+      description: N’incluez pas de clés API, mots de passe ni données privées.
+    validations:
+      required: false

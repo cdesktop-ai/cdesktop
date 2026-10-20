@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/cdesktop-ai/cdesktop/tree/main/docs
+    about: Consultez la documentation avant d’ouvrir un ticket.

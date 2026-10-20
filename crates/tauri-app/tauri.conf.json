@@ -1,11 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
-  "productName": "cdesktop",
+  "productName": "FreeClaude Voice",
   "version": "0.2.3",
-  "identifier": "ai.cdesktop",
+  "identifier": "app.freeclaude.voice",
   "build": {
     "beforeDevCommand": {
-      "script": "concurrently \"pnpm run backend:dev:watch\" \"pnpm run local-web:dev\"",
+      "script": "pnpm exec concurrently \"pnpm run backend:dev:watch\" \"pnpm run local-web:dev\"",
       "cwd": "../.."
     },
     "devUrl": "http://localhost:3000",
@@ -19,7 +19,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "macOS": {
       "bundleName": "cdesktop"
     },
@@ -32,17 +32,15 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Local desktop client for Claude Code",
-    "longDescription": "cdesktop: a local desktop/web client for the Claude Code CLI",
+    "shortDescription": "Windows desktop assistant with voice and model choice",
+    "longDescription": "FreeClaude Voice: a Windows desktop coding assistant with voice and multiple model providers",
     "createUpdaterArtifacts": true
   },
   "plugins": {
     "macos-fps": {},
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMyN0ZCNDVCMDhFMDdEQjAKUldTd2ZlQUlXN1IvTWt1Z0ZmaWpsUUVGOHl3QUExRVVWL0crWkROSjViRUZSTXdUODN4WkFlQ1AK",
-      "endpoints": [
-        "__TAURI_UPDATE_ENDPOINT__"
-      ]
+      "endpoints": ["__TAURI_UPDATE_ENDPOINT__"]
     }
   }
 }

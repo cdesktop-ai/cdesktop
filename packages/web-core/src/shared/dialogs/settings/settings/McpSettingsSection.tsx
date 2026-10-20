@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-// vibe-kanban: PlusIcon + cn used by hidden Popular Servers gallery
-// import { PlusIcon } from '@phosphor-icons/react';
+import { PlusIcon } from '@phosphor-icons/react';
 import type { BaseCodingAgent, ExecutorProfile } from 'shared/types';
 import { McpConfig } from 'shared/types';
 import { useUserSystem } from '@/shared/hooks/useUserSystem';
 import { McpConfigStrategyGeneral } from '@/shared/lib/mcpStrategies';
-// import { cn } from '@/shared/lib/utils';
+import { cn } from '@/shared/lib/utils';
 import { toPrettyCase } from '@/shared/lib/string';
 import {
   DropdownMenu,
@@ -196,42 +195,40 @@ export function McpSettingsSection() {
     setMcpError(null);
   };
 
-  // vibe-kanban: Popular Servers gallery — restore alongside addServer / servers / getMetaFor
-  // const addServer = (key: string) => {
-  //   try {
-  //     const existing = mcpServers.trim() ? JSON.parse(mcpServers) : {};
-  //     const updated = McpConfigStrategyGeneral.addPreconfiguredToConfig(
-  //       mcpConfig!,
-  //       existing,
-  //       key
-  //     );
-  //     setMcpServers(JSON.stringify(updated, null, 2));
-  //     setMcpError(null);
-  //   } catch (err) {
-  //     console.error(err);
-  //     setMcpError(
-  //       err instanceof Error
-  //         ? err.message
-  //         : t('settings.mcp.errors.addServerFailed')
-  //     );
-  //   }
-  // };
-  //
-  // const preconfiguredObj = (mcpConfig?.preconfigured ?? {}) as Record<
-  //   string,
-  //   unknown
-  // >;
-  // const meta =
-  //   typeof preconfiguredObj.meta === 'object' && preconfiguredObj.meta !== null
-  //     ? (preconfiguredObj.meta as Record<
-  //         string,
-  //         { name?: string; description?: string; url?: string; icon?: string }
-  //       >)
-  //     : {};
-  // const servers = Object.fromEntries(
-  //   Object.entries(preconfiguredObj).filter(([k]) => k !== 'meta')
-  // ) as Record<string, unknown>;
-  // const getMetaFor = (key: string) => meta[key] || {};
+  const addServer = (key: string) => {
+    try {
+      const existing = mcpServers.trim() ? JSON.parse(mcpServers) : {};
+      const updated = McpConfigStrategyGeneral.addPreconfiguredToConfig(
+        mcpConfig!,
+        existing,
+        key
+      );
+      setMcpServers(JSON.stringify(updated, null, 2));
+      setMcpError(null);
+    } catch (err) {
+      console.error(err);
+      setMcpError(
+        err instanceof Error
+          ? err.message
+          : t('settings.mcp.errors.addServerFailed')
+      );
+    }
+  };
+
+  const preconfiguredObj = (mcpConfig?.preconfigured ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const meta =
+    typeof preconfiguredObj.meta === 'object' && preconfiguredObj.meta !== null
+      ? (preconfiguredObj.meta as Record<
+          string,
+          { name?: string; description?: string; url?: string; icon?: string }
+        >)
+      : {};
+  const servers = Object.fromEntries(
+    Object.entries(preconfiguredObj).filter(([k]) => k !== 'meta')
+  ) as Record<string, unknown>;
 
   const profileOptions = profiles
     ? Object.keys(profiles)
@@ -348,10 +345,9 @@ export function McpSettingsSection() {
               />
             </SettingsField>
 
-            {/* HIDDEN: Popular Servers (preconfigured) section
             {mcpConfig?.preconfigured &&
-              typeof mcpConfig.preconfigured === 'object' &&
-              Object.keys(servers).length > 0 && (
+              Object.keys(servers).length > 0 &&
+              !mcpLoading && (
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-normal">
                     {t('settings.mcp.labels.popularServers')}
@@ -362,58 +358,69 @@ export function McpSettingsSection() {
 
                   <div className="grid grid-cols-2 gap-2">
                     {Object.entries(servers).map(([key]) => {
-                      const metaObj = getMetaFor(key) as {
-                        name?: string;
-                        description?: string;
-                        icon?: string;
-                      };
+                      const metaObj = meta[key] ?? {};
                       const name = metaObj.name || key;
-                      const description =
-                        metaObj.description || 'No description';
+                      const description = t(
+                        `settings.mcp.servers.${key}.description`,
+                        {
+                          defaultValue: metaObj.description || 'No description',
+                        }
+                      );
                       const icon = metaObj.icon ? `/${metaObj.icon}` : null;
 
                       return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => addServer(key)}
-                          className={cn(
-                            'flex items-start gap-3 p-3 rounded-sm border border-border/50 bg-secondary/30',
-                            'hover:bg-secondary hover:border-border transition-colors text-left'
-                          )}
-                        >
-                          <div className="w-6 h-6 rounded-sm border border-border bg-secondary flex items-center justify-center overflow-hidden shrink-0">
-                            {icon ? (
-                              <img
-                                src={icon}
-                                alt=""
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <span className="text-xs font-semibold text-normal">
-                                {name.slice(0, 1).toUpperCase()}
-                              </span>
+                        <div key={key} className="space-y-1">
+                          <button
+                            type="button"
+                            onClick={() => addServer(key)}
+                            title={metaObj.url}
+                            className={cn(
+                              'flex w-full items-start gap-3 p-3 rounded-sm border border-border/50 bg-secondary/30',
+                              'hover:bg-secondary hover:border-border transition-colors text-left'
                             )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="text-sm font-medium text-normal truncate">
-                              {name}
+                          >
+                            <div className="w-6 h-6 rounded-sm border border-border bg-secondary flex items-center justify-center overflow-hidden shrink-0">
+                              {icon ? (
+                                <img
+                                  src={icon}
+                                  alt=""
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <span className="text-xs font-semibold text-normal">
+                                  {name.slice(0, 1).toUpperCase()}
+                                </span>
+                              )}
                             </div>
-                            <div className="text-xs text-low line-clamp-2">
-                              {description}
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-medium text-normal truncate">
+                                {name}
+                              </div>
+                              <div className="text-xs text-low line-clamp-2">
+                                {description}
+                              </div>
                             </div>
-                          </div>
-                          <PlusIcon
-                            className="size-icon-xs text-low shrink-0"
-                            weight="bold"
-                          />
-                        </button>
+                            <PlusIcon
+                              className="size-icon-xs text-low shrink-0"
+                              weight="bold"
+                            />
+                          </button>
+                          {metaObj.url && (
+                            <a
+                              href={metaObj.url}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="pl-3 text-xs text-brand hover:underline"
+                            >
+                              {t('settings.mcp.labels.documentation')}
+                            </a>
+                          )}
+                        </div>
                       );
                     })}
                   </div>
                 </div>
               )}
-            */}
           </>
         )}
       </SettingsCard>

@@ -389,7 +389,8 @@
         "effortTooltip": "Effort {{label}}",
         "effortUnsupportedHermes": "Hermes n'accepte pas le niveau d'effort via ACP. Configurez model.reasoning_effort dans ~/.hermes/config.yaml.",
         "manageProviders": "Gérer les fournisseurs →",
-        "defaultModel": "Modèle par défaut"
+        "defaultModel": "Modèle par défaut",
+        "freeTag": "OFFRE GRATUITE"
       },
       "effort": {
         "low": "Faible",
@@ -419,12 +420,23 @@
         "selectPreset": "Sélectionner un préréglage",
         "custom": "Personnalisé",
         "providerDetails": "Détails du fournisseur",
+        "freeTierInfo": "Connecte-toi, crée une clé API, puis colle-la dans le champ Clé API ci-dessous. Les quotas et conditions des modèles gratuits sont définis par le fournisseur et peuvent évoluer.",
+        "createApiKey": "Ouvrir le fournisseur pour créer une clé API ↗",
         "name": "Nom",
         "namePlaceholder": "Mon fournisseur",
         "baseUrl": "URL de base",
         "baseUrlPlaceholder": "https://api.example.com",
         "apiKey": "Clé API",
         "apiKeyPlaceholder": "sk-…",
+        "apiKeyTestHint": "Vérifie l’accès à la liste des modèles par le service local. Aucun message de chat n’est envoyé.",
+        "apiKeyNoEndpoint": "Choisis un préréglage de fournisseur ou indique une URL d’API compatible avant de vérifier cette clé.",
+        "verifyApiKey": "Vérifier la clé et charger les modèles",
+        "apiKeyVerified": "Connexion vérifiée · {{count}} modèles trouvés",
+        "apiKeyInvalid": "La clé a été refusée. Vérifie qu’elle est copiée correctement et qu’elle n’a pas expiré.",
+        "apiKeyForbidden": "La clé est reconnue, mais elle n’a pas accès à cette adresse ou à la liste des modèles.",
+        "apiKeyQuota": "Le fournisseur signale une limite de requêtes ou un quota épuisé. Vérifie son tableau de bord, puis réessaie.",
+        "apiKeyNetwork": "Impossible de joindre le service de l’application ou le fournisseur. Vérifie que le service local est démarré, puis réessaie.",
+        "apiKeyGenericError": "La vérification a échoué. Vérifie l’adresse du fournisseur et la clé, puis réessaie.",
         "apiKeyOverride": "Clé API spécifique",
         "apiKeyOverrideHint": "Laisser vide pour utiliser la clé API du niveau supérieur",
         "backgroundTaskModel": "Modèle pour tâches en arrière-plan",
@@ -466,7 +478,16 @@
         "serverConfig": "Configuration du serveur (JSON)",
         "popularServers": "Serveurs populaires",
         "serverHelper": "Cliquez sur une carte pour insérer ce serveur MCP dans le JSON ci-dessus.",
+        "documentation": "Guide de configuration",
         "saveLocation": "Les modifications seront enregistrées dans :"
+      },
+      "servers": {
+        "notion": {
+          "description": "Rechercher, lire, créer et modifier des pages. La connexion Notion est demandée au premier accès."
+        },
+        "google_calendar": {
+          "description": "Lire et gérer des événements. Aperçu développeur Google : projet Google Cloud et configuration OAuth requis."
+        }
       },
       "loadingStates": {
         "jsonEditor": "Chargement...",

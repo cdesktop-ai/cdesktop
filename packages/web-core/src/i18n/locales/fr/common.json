@@ -932,5 +932,111 @@
     "sidebar": {
       "nav": "Routines"
     }
+  },
+  "composer": {
+    "responseMode": {
+      "label": "Style des réponses",
+      "call": "Appel",
+      "callLabel": "Style appel : réponses courtes adaptées à la voix",
+      "callDescription": "Demande des réponses plus courtes, adaptées à une conversation orale.",
+      "chat": "Discussion",
+      "chatLabel": "Style discussion : réponses détaillées",
+      "chatDescription": "Demande des réponses plus détaillées et structurées."
+    }
+  },
+  "landing": {
+    "loading": "Chargement…",
+    "preferencesTitle": "Configurez votre espace de travail",
+    "preferencesDescription": "Choisissez l’agent de codage, l’éditeur et le style de notification. Vous pourrez modifier ces choix plus tard.",
+    "safetyNotice": "FreeClaude Voice approuve les outils de l’agent par défaut et les exécute avec les droits de votre compte Windows. L’application n’élève pas ses droits elle-même; Windows peut demander une confirmation UAC pour les actions administrateur. Vérifiez les changements effectués par l’agent et les applications connectées.",
+    "learnMore": "En savoir plus",
+    "codingAgentHeading": "Agent de codage",
+    "codeEditorHeading": "Éditeur de code",
+    "customCommandLabel": "Commande personnalisée",
+    "customCommandPlaceholder": "ex. code --wait",
+    "notificationSoundHeading": "Son de notification",
+    "noSound": "Aucun son",
+    "saving": "Enregistrement…",
+    "continue": "Continuer",
+    "terms": "conditions d’utilisation",
+    "privacyPolicy": "politique de confidentialité",
+    "synchronizing": "Synchronisation de FreeClaude Voice",
+    "synchronizingDescription": "Détection de votre agent de codage et préparation de vos espaces de travail locaux…",
+    "feedbackTitle": "Dites-nous ce qui se passe",
+    "feedbackDescription": "Votre retour nous aide à voir ce qui fonctionne et ce qui bloque.",
+    "feedback": {
+      "works": "Ça fonctionne",
+      "blocked": "Ça ne fonctionne pas"
+    },
+    "feedbackPrompt": "Qu’essayiez-vous de faire ? Qu’est-ce qui a fonctionné ou bloqué ?",
+    "feedbackPlaceholder": "Décrivez le résultat ou le problème…",
+    "feedbackSave": "Enregistrer le retour",
+    "feedbackSaved": "Enregistré sur cet appareil.",
+    "feedbackSaveError": "Impossible d’enregistrer le retour sur cet appareil.",
+    "feedbackLocalOnly": "Stocké localement, non envoyé à GitHub.",
+    "startupDelayed": "Le démarrage prend plus de temps que prévu",
+    "startupDelayedDescription": "Le service Windows local ne répond pas. L’aperçu web a besoin de ce service pour ouvrir les espaces de travail et les conversations.",
+    "prerequisitesTitle": "Vérifier le démarrage",
+    "prerequisitesDescription": "Depuis les sources, lancez pnpm run setup:windows : choisissez une seule fois A pour installer automatiquement les prérequis et dépendances, ou M pour afficher le guide manuel complet. Python et cargo-watch ne sont pas nécessaires. Les outils de codage comme Claude Code et Codex s’installent séparément.",
+    "copySetupCommand": "Copier la commande de préparation",
+    "showManualGuide": "Suivre le guide manuel",
+    "manualGuideTitle": "Installation manuelle",
+    "manualGuideProgress": "Progression du guide manuel",
+    "manualStepCounter": "Étape {{current}} sur {{total}}",
+    "closeManualGuide": "Fermer le guide",
+    "manualPrevious": "Précédent",
+    "manualNext": "Étape suivante",
+    "manualFinish": "Terminer le guide",
+    "setupCommandHint": "Ouvrez PowerShell à la racine du projet et collez cette commande. Elle fonctionne même si pnpm n’est pas encore installé, puis vous propose le choix automatique ou manuel.",
+    "setupCommandCopied": "Commande copiée. Collez-la dans PowerShell, à la racine du projet.",
+    "setupCommandCopyFailed": "Copie impossible. Saisissez powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\\scripts\\setup-windows.ps1 dans PowerShell, à la racine du projet.",
+    "manualStep1": "Installez Node.js 20 ou plus récent depuis nodejs.org.",
+    "manualStep2": "Ouvrez une nouvelle fenêtre PowerShell, puis installez pnpm avec npm install --global pnpm@10.13.1.",
+    "manualStep3": "Installez Rustup pour Windows depuis rustup.rs.",
+    "manualStep4": "Installez la toolchain Rust du projet : rustup toolchain install nightly-2025-12-04 --component rustfmt --component rust-analyzer --component rust-src.",
+    "manualStep5": "À la racine du projet, installez les dépendances JavaScript : pnpm install --frozen-lockfile.",
+    "manualStep6": "Téléchargez les dépendances Rust : cargo fetch --locked.",
+    "manualStep7": "Vérifiez les prérequis : pnpm run check:windows-prereqs.",
+    "manualStep8": "Démarrez l’application : pnpm dev.",
+    "apiSetupProgress": "Étape 2 sur 3 · Fournisseur et style",
+    "apiSetupTitle": "Choisissez votre modèle de départ",
+    "apiSetupDescription": "Votre agent de codage est {{agent}}. Vous pouvez ajouter un fournisseur maintenant, ou continuer sans clé si cet agent est déjà connecté.",
+    "apiRecommendationsTitle": "Options recommandées",
+    "api": {
+      "openrouter": {
+        "name": "OpenRouter · recommandé",
+        "summary": "Une seule clé pour plusieurs fournisseurs. Son routeur gratuit annonce jusqu’à 200 000 tokens de contexte; les modèles gratuits disponibles et leurs limites changent.",
+        "guide": "1. Créez un compte OpenRouter. 2. Ouvrez la page des clés et créez une clé. 3. Revenez ici, choisissez le preset OpenRouter dans Ajouter un fournisseur, puis collez la clé dans le champ masqué. Le preset est compatible avec Claude Code. Ne collez jamais la clé dans une conversation. Vérifiez la politique de confidentialité du modèle et du fournisseur de calcul sélectionnés."
+      },
+      "gemini": {
+        "name": "Google AI Studio · grand contexte",
+        "summary": "Certains modèles Gemini 3 acceptent jusqu’à 1 million de tokens en entrée. Le modèle et l’accès gratuit dépendent du quota et de l’offre en vigueur; cette option convient surtout à l’agent Gemini.",
+        "guide": "1. Ouvrez Google AI Studio et connectez-vous. 2. Créez une clé API Gemini sur la page des clés. 3. Dans FreeClaude Voice, configurez-la pour l’agent Gemini. Vérifiez le quota du modèle choisi avant de lui confier un gros dépôt.",
+        "privacy": "À savoir : sur l’offre gratuite, Google peut utiliser les données envoyées pour améliorer ses produits. Évite d’envoyer des secrets ou du code confidentiel avec cette clé."
+      },
+      "nvidia": {
+        "name": "NVIDIA NIM · modèles sélectionnés",
+        "summary": "Des modèles ont parfois un accès gratuit avec des limites propres à chacun. Dans le catalogue actuel, le preset NVIDIA NIM ne prend pas en charge Claude Code; il s’adresse à certains autres agents.",
+        "guide": "1. Créez un compte sur NVIDIA Build. 2. Choisissez un modèle NIM et consultez son quota et ses conditions actuelles. 3. Créez une clé depuis la page du modèle, puis ajoutez le preset NVIDIA NIM dans FreeClaude Voice. Vérifiez que votre agent est compatible."
+      }
+    },
+    "readApiGuide": "Voir le guide",
+    "closeApiGuide": "Fermer",
+    "createApiKey": "Ouvrir le site officiel pour créer une clé ↗",
+    "responseStyleTitle": "Votre style de réponse",
+    "responseStyleDescription": "Le mode Appel demande des réponses courtes. Le micro dicte votre message et le bouton haut-parleur lit une réponse à voix haute.",
+    "addApiKeyTitle": "Ajouter une clé API maintenant",
+    "addApiKeyDescription": "La clé est masquée pendant la saisie et enregistrée avec ce fournisseur sur l’appareil. Vous pourrez aussi la configurer plus tard dans Paramètres → Fournisseurs.",
+    "openProviderForm": "Ajouter un fournisseur",
+    "closeProviderForm": "Fermer le formulaire",
+    "saveProvider": "Enregistrer le fournisseur",
+    "providerAdded": "Fournisseur enregistré sur cet appareil.",
+    "apiKeyOptional": "Facultatif : vous pouvez continuer et configurer un fournisseur plus tard.",
+    "skipApiSetup": "Continuer sans clé",
+    "continueToApp": "Continuer",
+    "backToPreferences": "Retour aux préférences",
+    "startupExample": "Exemple : si Rust ou une dépendance manque, le terminal affiche l’erreur précise. Corrigez-la puis sélectionnez Vérifier à nouveau.",
+    "retryStartup": "Vérifier à nouveau",
+    "retryingStartup": "Vérification…"
   }
 }

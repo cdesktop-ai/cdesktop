@@ -18,6 +18,7 @@ export interface UserSystemState {
   machineId: string | null;
   loginStatus: LoginStatus | null;
   remoteAuthDegraded: string | null;
+  systemError: string | null;
 }
 
 export interface UserSystemContextType {
@@ -39,6 +40,7 @@ export interface UserSystemContextType {
   machineId: string | null;
   loginStatus: LoginStatus | null;
   remoteAuthDegraded: string | null;
+  systemError: string | null;
   setEnvironment: (env: Environment | null) => void;
   setProfiles: (profiles: Record<string, ExecutorProfile> | null) => void;
   setCapabilities: (caps: Record<string, BaseAgentCapability[]> | null) => void;

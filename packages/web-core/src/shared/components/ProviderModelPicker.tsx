@@ -267,6 +267,10 @@ export function ProviderModelPicker({
                       ? t('settings.providers.defaultProviderName')
                       : item.provider.name
                   }
+                  freeTier={isFreeTierModel(
+                    item.provider.presetId ?? item.provider.id,
+                    item.modelId
+                  )}
                   isSelected={
                     item.provider.id === selectedProviderId &&
                     item.modelId === selectedModelId
@@ -395,6 +399,10 @@ function ProviderGroup({
             key={m.modelId}
             modelId={m.modelId}
             displayName={m.displayName}
+            freeTier={isFreeTierModel(
+              group.provider.presetId ?? group.provider.id,
+              m.modelId
+            )}
             isSelected={isSelected}
             onClick={() => onSelect(group.provider.id, m.modelId)}
           />
@@ -404,19 +412,29 @@ function ProviderGroup({
   );
 }
 
+function isFreeTierModel(providerId: string, modelId: string) {
+  return (
+    providerId === 'openrouter' &&
+    (modelId.endsWith(':free') || modelId === 'openrouter/free')
+  );
+}
+
 function ModelRow({
   modelId,
   displayName,
   providerName,
+  freeTier = false,
   isSelected,
   onClick,
 }: {
   modelId: string;
   displayName: string;
   providerName?: string;
+  freeTier?: boolean;
   isSelected: boolean;
   onClick: () => void;
 }) {
+  const { t } = useTranslation('settings');
   return (
     <button
       onClick={onClick}
@@ -425,7 +443,14 @@ function ModelRow({
         isSelected && 'bg-muted font-medium'
       )}
     >
-      <span className="truncate">{displayName || modelId}</span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        <span className="truncate">{displayName || modelId}</span>
+        {freeTier && (
+          <span className="shrink-0 rounded bg-success/15 px-1 py-0.5 text-[10px] text-success">
+            {t('settings.providers.picker.freeTag')}
+          </span>
+        )}
+      </span>
       {providerName && (
         <span className="text-low flex-shrink-0">{providerName}</span>
       )}

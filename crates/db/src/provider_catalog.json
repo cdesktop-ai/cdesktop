@@ -52,7 +52,10 @@
       },
       "enabledModels": [
         "anthropic/claude-sonnet-4.6",
-        "anthropic/claude-opus-4.7"
+        "anthropic/claude-opus-4.7",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "openrouter/free"
       ]
     },
     {
@@ -709,9 +712,8 @@
     },
     {
       "id": "nvidia",
-      "name": "Nvidia",
+      "name": "NVIDIA NIM",
       "agents": [
-        "CLAUDE_CODE",
         "OPENCODE",
         "HERMES",
         "DEEPSEEK_TUI"
@@ -754,7 +756,10 @@
         "apiKey": null
       },
       "enabledModels": [
-        "moonshotai/kimi-k2.5"
+        "moonshotai/kimi-k2.5",
+        "nvidia/nemotron-3-nano-30b-a3b",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "nvidia/nemotron-3-super-120b-a12b"
       ]
     },
     {

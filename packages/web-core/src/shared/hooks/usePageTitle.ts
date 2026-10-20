@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-const BASE_TITLE = 'cdesktop';
+const BASE_TITLE = 'FreeClaude Voice';
 
 /**
  * Sets the document title based on the given parts.

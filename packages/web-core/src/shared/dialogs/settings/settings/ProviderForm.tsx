@@ -84,6 +84,11 @@ type JsonValuish = string | number | boolean | null | object;
 type OptionsMap = Record<string, JsonValuish | undefined>;
 type PerAgentEnabled = Record<string, boolean | undefined>;
 
+const API_KEY_URL_BY_PRESET: Record<string, string> = {
+  openrouter: 'https://openrouter.ai/settings/keys',
+  nvidia: 'https://build.nvidia.com/',
+};
+
 function emptyPerAgentEnabled(): PerAgentEnabled {
   return Object.fromEntries(AGENT_KEYS.map((k) => [k, false]));
 }
@@ -324,6 +329,7 @@ export function ProviderForm({
   const [saving, setSaving] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [apiKeyVerified, setApiKeyVerified] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [fetchSearch, setFetchSearch] = useState('');
 
@@ -388,7 +394,8 @@ export function ProviderForm({
         // deepseekTuiPayload.baseUrl || // DeepSeek TUI hidden
         '';
       if (!baseUrl) {
-        throw new Error('No base URL configured for any agent');
+        setFetchError(t('settings.providers.form.apiKeyNoEndpoint'));
+        return;
       }
       const res = await makeLocalApiRequest('/api/providers/fetch-models', {
         method: 'POST',
@@ -403,9 +410,23 @@ export function ProviderForm({
       const body = await res.json();
       const fetched: FetchedModel[] = body.data?.models ?? [];
       setFetchedModels(fetched);
+      setApiKeyVerified(true);
+      setFetchError(null);
       setFetchSearch('');
     } catch (e: unknown) {
-      setFetchError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setApiKeyVerified(false);
+      if (/401|unauthori[sz]ed|invalid.*key/i.test(message)) {
+        setFetchError(t('settings.providers.form.apiKeyInvalid'));
+      } else if (/403|forbidden|permission/i.test(message)) {
+        setFetchError(t('settings.providers.form.apiKeyForbidden'));
+      } else if (/429|rate.?limit|quota/i.test(message)) {
+        setFetchError(t('settings.providers.form.apiKeyQuota'));
+      } else if (/request failed|timed? ?out|network|connect/i.test(message)) {
+        setFetchError(t('settings.providers.form.apiKeyNetwork'));
+      } else {
+        setFetchError(t('settings.providers.form.apiKeyGenericError'));
+      }
     } finally {
       setFetchingModels(false);
     }
@@ -522,6 +543,19 @@ export function ProviderForm({
       )}
 
       <SettingsCard title={t('settings.providers.form.providerDetails')}>
+        {selectedPresetId && API_KEY_URL_BY_PRESET[selectedPresetId] && (
+          <div className="mb-3 rounded-sm border border-brand/40 bg-brand/5 p-3 text-sm text-normal">
+            <p>{t('settings.providers.form.freeTierInfo')}</p>
+            <a
+              href={API_KEY_URL_BY_PRESET[selectedPresetId]}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-1 inline-block text-brand hover:underline"
+            >
+              {t('settings.providers.form.createApiKey')}
+            </a>
+          </div>
+        )}
         <SettingsField label={t('settings.providers.form.name')}>
           <InputBase
             value={name}
@@ -533,9 +567,41 @@ export function ProviderForm({
           <InputBase
             type="password"
             value={apiKey}
-            onChange={setApiKey}
+            onChange={(value) => {
+              setApiKey(value);
+              setApiKeyVerified(false);
+              setFetchError(null);
+            }}
             placeholder={t('settings.providers.form.apiKeyPlaceholder')}
           />
+          <p className="mt-1 text-xs text-low">
+            {t('settings.providers.form.apiKeyTestHint')}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleFetchModels()}
+              disabled={!apiKey.trim() || fetchingModels}
+              className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-muted disabled:opacity-50"
+            >
+              <ArrowClockwiseIcon
+                className={cn('h-3 w-3', fetchingModels && 'animate-spin')}
+              />
+              {t('settings.providers.form.verifyApiKey')}
+            </button>
+            {apiKeyVerified && !fetchError && (
+              <span role="status" className="text-xs text-success">
+                {t('settings.providers.form.apiKeyVerified', {
+                  count: fetchedModels.length,
+                })}
+              </span>
+            )}
+            {fetchError && (
+              <span role="alert" className="text-xs text-error">
+                {fetchError}
+              </span>
+            )}
+          </div>
         </SettingsField>
       </SettingsCard>
 
@@ -797,19 +863,6 @@ export function ProviderForm({
       </SettingsCard>
 
       <SettingsCard title={t('settings.providers.form.models')}>
-        <div className="flex gap-2 mb-2">
-          <button
-            onClick={handleFetchModels}
-            disabled={!apiKey || fetchingModels}
-            className="flex items-center gap-1 text-xs px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-50"
-          >
-            <ArrowClockwiseIcon
-              className={cn('w-3 h-3', fetchingModels && 'animate-spin')}
-            />
-            {t('settings.providers.form.fetchFromEndpoint')}
-          </button>
-        </div>
-        {fetchError && <p className="text-xs text-error mb-2">{fetchError}</p>}
         {enabledModels.length > 0 && (
           <ul className="flex flex-col gap-1 mb-2 max-h-40 overflow-y-auto">
             {enabledModels.map((m) => (

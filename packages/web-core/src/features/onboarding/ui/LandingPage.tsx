@@ -9,7 +9,6 @@ import {
 import {
   BookOpenIcon,
   BirdIcon,
-  CaretDownIcon,
   CheckIcon,
   CowIcon,
   DeviceMobileIcon,
@@ -24,8 +23,11 @@ import {
 } from '@phosphor-icons/react';
 import { ProviderForm } from '@/shared/dialogs/settings/settings/ProviderForm';
 import { useCreateProvider } from '@/shared/hooks/useProviders';
+import { useQueries } from '@tanstack/react-query';
+import { configApi } from '@/shared/lib/api';
 import type { IconProps } from '@phosphor-icons/react';
 import { usePostHog } from 'posthog-js/react';
+import { useTranslation } from 'react-i18next';
 import { siDiscord } from 'simple-icons';
 import {
   BaseCodingAgent,
@@ -134,48 +136,203 @@ function randomDefaultSoundFile(): SoundFile {
   return SOUND_OPTIONS[randomIndex]?.value ?? SoundFile.COW_MOOING;
 }
 
-function OnboardingProviderSection() {
-  const [expanded, setExpanded] = useState(false);
+type ProviderGuideId = 'openrouter' | 'gemini' | 'nvidia';
+
+function OnboardingProviderSection({
+  selectedAgent,
+  onBack,
+  onContinue,
+}: {
+  selectedAgent: BaseCodingAgent;
+  onBack: () => void;
+  onContinue: () => void;
+}) {
+  const { t } = useTranslation('common');
+  const [guide, setGuide] = useState<ProviderGuideId | null>(null);
+  const [showProviderForm, setShowProviderForm] = useState(false);
   const [added, setAdded] = useState(false);
   const createProvider = useCreateProvider();
+  const [responseMode, setResponseMode] = useState<'call' | 'chat'>(() =>
+    localStorage.getItem('freeclaude-response-mode') === 'call' ? 'call' : 'chat'
+  );
 
-  if (added) {
-    return (
-      <div className="border-t border-border px-double py-base flex items-center gap-2 text-sm text-low">
-        <CheckIcon className="text-brand" weight="bold" />
-        Provider added. You can manage providers in Settings → Providers.
-      </div>
-    );
-  }
+  const selectResponseMode = (mode: 'call' | 'chat') => {
+    setResponseMode(mode);
+    localStorage.setItem('freeclaude-response-mode', mode);
+  };
 
   return (
-    <div className="border-t border-border">
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center justify-between px-double py-base text-sm hover:bg-muted"
-      >
-        <span className="text-low">Add a provider (optional)</span>
-        <CaretDownIcon
-          className={cn(
-            'text-low transition-transform',
-            expanded && 'rotate-180'
-          )}
-        />
-      </button>
-      {expanded && (
-        <div className="px-double pb-double">
+    <div className="h-screen overflow-y-auto bg-primary p-4 sm:p-8">
+      <div className="mx-auto flex min-h-full max-w-4xl flex-col justify-center">
+        <div className="rounded-xl border border-border bg-secondary shadow-xl">
+          <header className="border-b border-border p-6">
+            <p className="text-xs font-medium uppercase tracking-wider text-brand">
+              {t('landing.apiSetupProgress')}
+            </p>
+            <h1 className="mt-2 text-2xl font-semibold text-high">
+              {t('landing.apiSetupTitle')}
+            </h1>
+            <p className="mt-2 max-w-3xl text-sm text-low">
+              {t('landing.apiSetupDescription', { agent: getAgentName(selectedAgent) })}
+            </p>
+          </header>
+
+          <div className="space-y-6 p-6">
+            <section>
+              <h2 className="text-sm font-semibold text-high">
+                {t('landing.apiRecommendationsTitle')}
+              </h2>
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                {(['openrouter', 'gemini', 'nvidia'] as const).map((id) => (
+                  <article key={id} className="flex flex-col rounded-lg border border-border bg-panel p-4">
+                    <p className="font-medium text-high">{t(`landing.api.${id}.name`)}</p>
+                    <p className="mt-2 flex-1 text-xs leading-relaxed text-low">
+                      {t(`landing.api.${id}.summary`)}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setGuide(id)}
+                      className="mt-4 self-start text-xs font-medium text-brand hover:underline"
+                    >
+                      {t('landing.readApiGuide')}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            {guide && (
+              <section className="rounded-lg border border-brand/40 bg-brand/5 p-4" aria-live="polite">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="font-semibold text-high">
+                      {t(`landing.api.${guide}.name`)}
+                    </h2>
+                    <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-normal">
+                      {t(`landing.api.${guide}.guide`)
+                        .split(/(?=\d+\.\s)/)
+                        .filter(Boolean)
+                        .map((step, index) => (
+                          <li key={`${guide}-step-${index}`}>
+                            {step.replace(/^\d+\.\s/, '')}
+                          </li>
+                        ))}
+                    </ol>
+                    {guide === 'gemini' && (
+                      <p className="mt-2 text-xs text-low">
+                        {t('landing.api.gemini.privacy')}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setGuide(null)}
+                    className="rounded px-2 py-1 text-xs text-low hover:bg-secondary"
+                  >
+                    {t('landing.closeApiGuide')}
+                  </button>
+                </div>
+                <a
+                  href={
+                    guide === 'openrouter'
+                      ? 'https://openrouter.ai/settings/keys'
+                      : guide === 'gemini'
+                        ? 'https://aistudio.google.com/app/apikey'
+                        : 'https://build.nvidia.com/'
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-3 inline-block text-sm font-medium text-brand hover:underline"
+                >
+                  {t('landing.createApiKey')}
+                </a>
+              </section>
+            )}
+
+            <section className="rounded-lg border border-border p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-high">
+                    {t('landing.responseStyleTitle')}
+                  </h2>
+                  <p className="mt-1 text-xs text-low">
+                    {t('landing.responseStyleDescription')}
+                  </p>
+                </div>
+                <div role="group" aria-label={t('composer.responseMode.label')} className="flex rounded-md border border-border p-0.5">
+                  {(['call', 'chat'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      aria-pressed={responseMode === mode}
+                      title={t(`composer.responseMode.${mode}Description`)}
+                      onClick={() => selectResponseMode(mode)}
+                      className={`rounded px-3 py-2 text-sm ${responseMode === mode ? 'bg-accent font-medium text-foreground' : 'text-low hover:text-high'}`}
+                    >
+                      {t(`composer.responseMode.${mode}`)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-high">
+                    {t('landing.addApiKeyTitle')}
+                  </h2>
+                  <p className="mt-1 text-xs text-low">
+                    {t('landing.addApiKeyDescription')}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowProviderForm((open) => !open)}
+                  className="rounded-md border border-border px-3 py-2 text-sm text-high hover:bg-primary"
+                >
+                  {t(showProviderForm ? 'landing.closeProviderForm' : 'landing.openProviderForm')}
+                </button>
+              </div>
+              {added && (
+                <p role="status" className="mt-3 flex items-center gap-2 text-sm text-success">
+                  <CheckIcon weight="bold" /> {t('landing.providerAdded')}
+                </p>
+              )}
+              {showProviderForm && (
+                <div className="mt-4 rounded-lg border border-border bg-panel p-4">
           <ProviderForm
             onSave={async (data) => {
               await createProvider.mutateAsync(
                 data as import('shared/types').CreateProvider
               );
               setAdded(true);
+              setShowProviderForm(false);
             }}
-            onCancel={() => setExpanded(false)}
-            saveLabel="Add provider"
+            onCancel={() => setShowProviderForm(false)}
+            saveLabel={t('landing.saveProvider')}
           />
+                </div>
+              )}
+            </section>
+          </div>
+
+          <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border p-6">
+            <button type="button" onClick={onBack} className="rounded-md px-3 py-2 text-sm text-low hover:bg-panel hover:text-high">
+              {t('landing.backToPreferences')}
+            </button>
+            <p className="order-last w-full text-center text-xs text-low sm:order-none sm:w-auto">
+              {t('landing.apiKeyOptional')}
+            </p>
+            <div className="flex gap-2">
+              <button type="button" onClick={onContinue} className="rounded-md px-3 py-2 text-sm text-low hover:text-high">
+                {t('landing.skipApiSetup')}
+              </button>
+              <PrimaryButton value={t('landing.continueToApp')} onClick={onContinue} />
+            </div>
+          </footer>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -191,16 +348,20 @@ function resolveTheme(theme: ThemeMode): 'light' | 'dark' {
 
 export function LandingPage() {
   const appNavigation = useAppNavigation();
+  const { t } = useTranslation('common');
   const { theme } = useTheme();
   const { config, profiles, updateAndSaveConfig, loading } = useUserSystem();
   const posthog = usePostHog();
 
   const [initialized, setInitialized] = useState(false);
+  const [showProviderSetup, setShowProviderSetup] = useState(false);
   const [saving, setSaving] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<BaseCodingAgent>(
     BaseCodingAgent.CLAUDE_CODE
   );
+  const [agentSelectionTouched, setAgentSelectionTouched] = useState(false);
   const [editorType, setEditorType] = useState<EditorType>(EditorType.VS_CODE);
+  const [editorSelectionTouched, setEditorSelectionTouched] = useState(false);
   const [customCommand, setCustomCommand] = useState('');
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [soundFile, setSoundFile] = useState<SoundFile>(randomDefaultSoundFile);
@@ -257,6 +418,90 @@ export function LandingPage() {
       : [...Object.values(BaseCodingAgent)];
     return filterAndSortAgents(source);
   }, [profiles]);
+
+  const agentAvailability = useQueries({
+    queries: executorOptions.map((agent) => ({
+      queryKey: ['onboarding-agent-availability', agent],
+      queryFn: () => configApi.checkAgentAvailability(agent),
+      staleTime: 5 * 60 * 1000,
+      retry: false,
+    })),
+  });
+  const availableEditorOptions = useMemo(
+    () => Object.values(EditorType).filter((editor) => editor !== EditorType.CUSTOM),
+    []
+  );
+  const editorAvailability = useQueries({
+    queries: availableEditorOptions.map((editor) => ({
+      queryKey: ['onboarding-editor-availability', editor],
+      queryFn: () => configApi.checkEditorAvailability(editor),
+      staleTime: 5 * 60 * 1000,
+      retry: false,
+    })),
+  });
+
+  useEffect(() => {
+    if (
+      !initialized ||
+      agentSelectionTouched ||
+      agentAvailability.length === 0 ||
+      agentAvailability.some((query) => !query.isFetched)
+    ) {
+      return;
+    }
+    const selectedIndex = executorOptions.indexOf(selectedAgent);
+    const selectedAvailability = agentAvailability[selectedIndex]?.data?.type;
+    const currentAgentAvailable =
+      selectedAvailability === 'LOGIN_DETECTED' ||
+      selectedAvailability === 'INSTALLATION_FOUND';
+    if (currentAgentAvailable) return;
+
+    const recommendedIndex = agentAvailability.findIndex(
+      (query) => query.data?.type === 'LOGIN_DETECTED'
+    );
+    const installedIndex = agentAvailability.findIndex(
+      (query) => query.data?.type === 'INSTALLATION_FOUND'
+    );
+    const availableIndex = recommendedIndex >= 0 ? recommendedIndex : installedIndex;
+    if (availableIndex >= 0) {
+      setSelectedAgent(executorOptions[availableIndex]);
+    }
+  }, [
+    agentAvailability,
+    agentSelectionTouched,
+    executorOptions,
+    initialized,
+    selectedAgent,
+  ]);
+
+  useEffect(() => {
+    if (
+      !initialized ||
+      editorSelectionTouched ||
+      editorAvailability.length === 0 ||
+      editorAvailability.some((query) => !query.isFetched)
+    ) {
+      return;
+    }
+    const selectedIndex = availableEditorOptions.findIndex(
+      (editor) => editor === editorType
+    );
+    if (selectedIndex >= 0 && editorAvailability[selectedIndex]?.data?.available) {
+      return;
+    }
+    const recommendedIndex = editorAvailability.findIndex(
+      (query) => query.data?.available
+    );
+    if (recommendedIndex >= 0) {
+      setEditorType(availableEditorOptions[recommendedIndex]);
+    }
+  }, [
+    availableEditorOptions,
+    editorAvailability,
+    editorSelectionTouched,
+    editorType,
+    initialized,
+  ]);
 
   const editorOptions = useMemo(() => Object.values(EditorType), []);
 
@@ -325,11 +570,9 @@ export function LandingPage() {
     if (success) {
       trackRemoteOnboardingEvent(REMOTE_ONBOARDING_EVENTS.STAGE_COMPLETED, {
         stage: 'landing',
-        destination: '/onboarding/sign-in',
+        destination: '/onboarding/providers',
       });
-      appNavigation.goToOnboardingSignIn({
-        replace: true,
-      });
+      setShowProviderSetup(true);
       return;
     }
 
@@ -342,13 +585,23 @@ export function LandingPage() {
   if (loading || !config || !initialized) {
     return (
       <div className="h-screen bg-primary flex items-center justify-center">
-        <p className="text-low">Loading...</p>
+        <p className="text-low">{t('landing.loading')}</p>
       </div>
     );
   }
 
   if (config.remote_onboarding_acknowledged) {
     return null;
+  }
+
+  if (showProviderSetup) {
+    return (
+      <OnboardingProviderSection
+        selectedAgent={selectedAgent}
+        onBack={() => setShowProviderSetup(false)}
+        onContinue={() => appNavigation.goToOnboardingSignIn({ replace: true })}
+      />
+    );
   }
 
   return (
@@ -363,7 +616,11 @@ export function LandingPage() {
         {/* Header */}
         <header className="shrink-0 space-y-base p-double pb-base">
           <div className="flex items-center justify-between">
-            <img src={logoSrc} alt="cdesktop" className="h-8 w-auto logo" />
+            <img
+              src={logoSrc}
+              alt="FreeClaude Voice"
+              className="h-8 w-auto logo"
+            />
             <div className="flex flex-wrap items-center gap-2">
               {SOCIAL_LINKS.map((link) => (
                 <PrimaryButton
@@ -376,24 +633,29 @@ export function LandingPage() {
               ))}
             </div>
           </div>
-          <div className="rounded-sm border border-brand bg-brand/20 p-base">
+            <div>
+              <h1 className="text-xl font-semibold text-high">
+                {t('landing.preferencesTitle')}
+              </h1>
+              <p className="mt-1 text-sm text-low">
+                {t('landing.preferencesDescription')}
+              </p>
+            </div>
+            <div className="rounded-sm border border-brand bg-brand/20 p-base">
             <div className="flex items-start gap-base">
               <WarningIcon
                 className="size-icon-sm text-brand shrink-0 mt-[2px]"
                 weight="fill"
               />
               <p className="text-sm text-normal">
-                cdesktop runs AI coding agents with{' '}
-                <code>--dangerously-skip-permissions</code> /{' '}
-                <code>--yolo</code> by default. Always review what agents are
-                doing.{' '}
+                {t('landing.safetyNotice')}{' '}
                 <a
                   href="https://cdesktop.ai/docs/safety-notice"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-brand hover:underline"
                 >
-                  Learn more
+                  {t('landing.learnMore')}
                 </a>
                 .
               </p>
@@ -403,10 +665,10 @@ export function LandingPage() {
 
         {/* 3-column grid */}
         <div className="min-h-0 flex-1 overflow-y-auto px-double pb-double">
-          <div className="grid grid-cols-3 gap-double">
+          <div className="grid grid-cols-1 gap-double md:grid-cols-3">
             {/* Column 1: Coding Agent */}
             <section className="space-y-half">
-              <h2 className="text-sm font-medium text-high">Coding Agent</h2>
+              <h2 className="text-sm font-medium text-high">{t('landing.codingAgentHeading')}</h2>
               <div className="grid gap-1.5">
                 {executorOptions.map((agent) => {
                   const selected = selectedAgent === agent;
@@ -415,7 +677,10 @@ export function LandingPage() {
                     <button
                       key={agent}
                       type="button"
-                      onClick={() => setSelectedAgent(agent)}
+                      onClick={() => {
+                        setAgentSelectionTouched(true);
+                        setSelectedAgent(agent);
+                      }}
                       className={cn(
                         'flex items-center gap-base rounded-sm border px-base py-half text-left',
                         selected
@@ -444,7 +709,7 @@ export function LandingPage() {
 
             {/* Column 2: Code Editor */}
             <section className="space-y-half">
-              <h2 className="text-sm font-medium text-high">Code Editor</h2>
+              <h2 className="text-sm font-medium text-high">{t('landing.codeEditorHeading')}</h2>
               <div className="grid gap-1.5">
                 {editorOptions.map((editor) => {
                   const selected = editorType === editor;
@@ -453,7 +718,10 @@ export function LandingPage() {
                     <button
                       key={editor}
                       type="button"
-                      onClick={() => setEditorType(editor)}
+                      onClick={() => {
+                        setEditorSelectionTouched(true);
+                        setEditorType(editor);
+                      }}
                       className={cn(
                         'flex items-center gap-base rounded-sm border px-base py-half text-left',
                         selected
@@ -482,13 +750,13 @@ export function LandingPage() {
               {editorType === EditorType.CUSTOM && (
                 <div className="space-y-half">
                   <label className="text-sm font-medium text-normal">
-                    Custom Command
+                    {t('landing.customCommandLabel')}
                   </label>
                   <input
                     type="text"
                     value={customCommand}
                     onChange={(e) => setCustomCommand(e.target.value)}
-                    placeholder="e.g. code --wait"
+                    placeholder={t('landing.customCommandPlaceholder')}
                     className={cn(
                       'w-full bg-panel border rounded-sm px-base py-half text-sm text-high',
                       'placeholder:text-low placeholder:opacity-80 focus:outline-none',
@@ -505,7 +773,7 @@ export function LandingPage() {
             {/* Column 3: Notification Sound */}
             <section className="space-y-half">
               <h2 className="text-sm font-medium text-high">
-                Notification Sound
+                {t('landing.notificationSoundHeading')}
               </h2>
               <div className="grid gap-1.5">
                 {SOUND_OPTIONS.map((option) => {
@@ -560,7 +828,7 @@ export function LandingPage() {
                     )}
                     weight={!soundEnabled ? 'fill' : 'bold'}
                   />
-                  <span className="text-sm text-normal flex-1">No sound</span>
+                  <span className="text-sm text-normal flex-1">{t('landing.noSound')}</span>
                   {!soundEnabled && (
                     <CheckIcon
                       className="size-icon-xs text-brand shrink-0"
@@ -573,9 +841,6 @@ export function LandingPage() {
           </div>
         </div>
 
-        {/* Providers section */}
-        <OnboardingProviderSection />
-
         {/* Footer */}
         <div className="shrink-0 border-t border-border p-double pt-base flex items-center justify-between gap-base">
           <p className="text-xs text-low">
@@ -586,7 +851,7 @@ export function LandingPage() {
               rel="noopener noreferrer"
               className="text-brand hover:underline"
             >
-              terms and conditions
+              {t('landing.terms')}
             </a>{' '}
             and{' '}
             <a
@@ -595,12 +860,12 @@ export function LandingPage() {
               rel="noopener noreferrer"
               className="text-brand hover:underline"
             >
-              privacy policy
+              {t('landing.privacyPolicy')}
             </a>
             .
           </p>
           <PrimaryButton
-            value={saving ? 'Saving...' : 'Continue'}
+            value={saving ? t('landing.saving') : t('landing.continue')}
             onClick={handleContinue}
             disabled={!canContinue}
           />

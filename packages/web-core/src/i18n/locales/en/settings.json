@@ -397,7 +397,8 @@
         "effortTooltip": "{{label}} effort",
         "effortUnsupportedHermes": "Hermes doesn't accept effort over ACP. Set model.reasoning_effort in ~/.hermes/config.yaml.",
         "manageProviders": "Manage providers →",
-        "defaultModel": "Default Model"
+        "defaultModel": "Default Model",
+        "freeTag": "FREE TIER"
       },
       "effort": {
         "low": "Low",
@@ -427,12 +428,23 @@
         "selectPreset": "Select a preset",
         "custom": "Custom",
         "providerDetails": "Provider details",
+        "freeTierInfo": "Sign in, create an API key, then paste it into the API key field below. Free endpoint quotas and terms are set by the provider and may change.",
+        "createApiKey": "Open provider to create an API key ↗",
         "name": "Name",
         "namePlaceholder": "My Provider",
         "baseUrl": "Base URL",
         "baseUrlPlaceholder": "https://api.example.com",
         "apiKey": "API key",
         "apiKeyPlaceholder": "sk-…",
+        "apiKeyTestHint": "Checks access to the provider’s model list through the local service. It does not send a chat prompt.",
+        "apiKeyNoEndpoint": "Choose a provider preset or enter a compatible API URL before checking this key.",
+        "verifyApiKey": "Verify key and load models",
+        "apiKeyVerified": "Connection verified · {{count}} models found",
+        "apiKeyInvalid": "The key was rejected. Check that it is copied correctly and has not expired.",
+        "apiKeyForbidden": "The key is valid but does not have access to this endpoint or model list.",
+        "apiKeyQuota": "The provider reports a rate limit or exhausted quota. Wait, check the provider dashboard, then retry.",
+        "apiKeyNetwork": "Could not reach the app service or provider. Check that the local service is running, then retry.",
+        "apiKeyGenericError": "Verification failed. Check the provider URL and key, then retry.",
         "apiKeyOverride": "API key override",
         "apiKeyOverrideHint": "Leave empty to use the provider's top-level API key",
         "backgroundTaskModel": "Background task model",
@@ -474,7 +486,16 @@
         "serverConfig": "Server Configuration (JSON)",
         "popularServers": "Popular servers",
         "serverHelper": "Click a card to insert that MCP Server into the JSON above.",
+        "documentation": "Setup guide",
         "saveLocation": "Changes will be saved to:"
+      },
+      "servers": {
+        "notion": {
+          "description": "Search, read, create and update pages. Sign in to Notion when the agent connects."
+        },
+        "google_calendar": {
+          "description": "Read and manage events. Google Developer Preview; requires a Google Cloud project and OAuth setup."
+        }
       },
       "loadingStates": {
         "jsonEditor": "Loading...",

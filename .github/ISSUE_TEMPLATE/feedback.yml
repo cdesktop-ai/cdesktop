@@ -1,0 +1,33 @@
+name: Donner un avis
+description: Dire ce qui est pratique, ce qui gêne et ce qui manque.
+title: "[Avis] "
+labels: [feedback]
+body:
+  - type: textarea
+    id: worked
+    attributes:
+      label: Ce qui a bien fonctionné
+      placeholder: J’ai apprécié…
+    validations:
+      required: false
+  - type: textarea
+    id: friction
+    attributes:
+      label: Ce qui a été difficile ou n’a pas fonctionné
+      placeholder: J’ai été bloqué lorsque…
+    validations:
+      required: false
+  - type: textarea
+    id: missing
+    attributes:
+      label: Ce que vous aimeriez pouvoir faire
+      placeholder: Ce qui m’aiderait…
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Contexte utile
+      description: Votre version de Windows et les étapes suivies. N’incluez pas de secrets ni de données privées.
+    validations:
+      required: false

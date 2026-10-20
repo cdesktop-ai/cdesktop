@@ -24,8 +24,15 @@ interface UseSessionSendOptions {
 }
 
 interface UseSessionSendResult {
-  /** Send a message. Returns true on success, false on failure. */
-  send: (message: string) => Promise<boolean>;
+  /** Send a message, optionally overriding the selected provider/model. */
+  send: (
+    message: string,
+    override?: {
+      providerId: string;
+      modelId: string;
+      reasoningId?: string | null;
+    }
+  ) => Promise<boolean>;
   /** Whether a send operation is in progress */
   isSending: boolean;
   /** Error message if send failed */
@@ -59,7 +66,14 @@ export function useSessionSend({
   const [error, setError] = useState<string | null>(null);
 
   const send = useCallback(
-    async (message: string): Promise<boolean> => {
+    async (
+      message: string,
+      override?: {
+        providerId: string;
+        modelId: string;
+        reasoningId?: string | null;
+      }
+    ): Promise<boolean> => {
       const trimmed = message.trim();
       if (!trimmed) return false;
       if (!executorConfig) {
@@ -76,11 +90,18 @@ export function useSessionSend({
       // spawn applier skips `--model` instead of sending `--model ""`.
       const effectiveConfig: ExecutorConfig = {
         ...executorConfig,
-        model_id: isAgentDefaultModelId(selectedModelId ?? null)
+        model_id: isAgentDefaultModelId(
+          override?.modelId ?? selectedModelId ?? null
+        )
           ? null
-          : (selectedModelId ?? executorConfig.model_id ?? null),
+          : (override?.modelId ??
+            selectedModelId ??
+            executorConfig.model_id ??
+            null),
         reasoning_id:
-          selectedReasoningId ?? executorConfig.reasoning_id ?? null,
+          override && 'reasoningId' in override
+            ? override.reasoningId
+            : (selectedReasoningId ?? executorConfig.reasoning_id ?? null),
       };
 
       if (isNewSessionMode) {
@@ -94,7 +115,7 @@ export function useSessionSend({
             workspaceId,
             prompt: trimmed,
             executorConfig: effectiveConfig,
-            selectedProviderId,
+            selectedProviderId: override?.providerId ?? selectedProviderId,
           });
           onSelectSession?.(session.id);
           return true;
@@ -116,7 +137,8 @@ export function useSessionSend({
             retry_process_id: null,
             force_when_dirty: null,
             perform_git_reset: null,
-            selected_provider_id: selectedProviderId ?? undefined,
+            selected_provider_id:
+              override?.providerId ?? selectedProviderId ?? undefined,
           });
           return true;
         } catch (e: unknown) {

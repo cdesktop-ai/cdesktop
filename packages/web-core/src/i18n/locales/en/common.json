@@ -932,5 +932,111 @@
     "sidebar": {
       "nav": "Routines"
     }
+  },
+  "composer": {
+    "responseMode": {
+      "label": "Response style",
+      "call": "Call",
+      "callLabel": "Call style: short, voice-friendly replies",
+      "callDescription": "Requests shorter replies suited to spoken conversation.",
+      "chat": "Chat",
+      "chatLabel": "Chat style: detailed replies",
+      "chatDescription": "Requests more detailed, structured replies."
+    }
+  },
+  "landing": {
+    "loading": "Loading…",
+    "preferencesTitle": "Set up your workspace",
+    "preferencesDescription": "Choose your coding agent, editor, and notification style. You can change these later.",
+    "safetyNotice": "FreeClaude Voice approves agent tools by default and runs them with your Windows account permissions. The app does not elevate itself; Windows may ask for UAC confirmation for administrator actions. Review changes made by the agent and connected apps.",
+    "learnMore": "Learn more",
+    "codingAgentHeading": "Coding agent",
+    "codeEditorHeading": "Code editor",
+    "customCommandLabel": "Custom command",
+    "customCommandPlaceholder": "e.g. code --wait",
+    "notificationSoundHeading": "Notification sound",
+    "noSound": "No sound",
+    "saving": "Saving…",
+    "continue": "Continue",
+    "terms": "terms and conditions",
+    "privacyPolicy": "privacy policy",
+    "synchronizing": "Synchronizing FreeClaude Voice",
+    "synchronizingDescription": "Detecting your coding agent and preparing your local workspaces…",
+    "feedbackTitle": "Tell us what happened",
+    "feedbackDescription": "Your feedback helps us see what works and what gets in the way.",
+    "feedback": {
+      "works": "It works",
+      "blocked": "It does not work"
+    },
+    "feedbackPrompt": "What were you trying to do? What worked or got stuck?",
+    "feedbackPlaceholder": "Describe the result or the problem…",
+    "feedbackSave": "Save feedback",
+    "feedbackSaved": "Saved on this device.",
+    "feedbackSaveError": "Could not save feedback on this device.",
+    "feedbackLocalOnly": "Stored locally; not sent to GitHub.",
+    "startupDelayed": "Startup is taking longer than expected",
+    "startupDelayedDescription": "The local Windows service did not respond. The web preview needs that service to open workspaces and conversations.",
+    "prerequisitesTitle": "Check startup requirements",
+    "prerequisitesDescription": "From source, run pnpm run setup:windows and make one choice: A installs all prerequisites and project dependencies automatically, or M shows the complete manual guide. Python and cargo-watch are not required. Coding agents such as Claude Code and Codex are installed separately.",
+    "copySetupCommand": "Copy setup command",
+    "showManualGuide": "Follow the manual guide",
+    "manualGuideTitle": "Manual setup",
+    "manualGuideProgress": "Manual guide progress",
+    "manualStepCounter": "Step {{current}} of {{total}}",
+    "closeManualGuide": "Close the guide",
+    "manualPrevious": "Previous",
+    "manualNext": "Next step",
+    "manualFinish": "Finish guide",
+    "setupCommandHint": "Open PowerShell at the project root and paste this command. It works even if pnpm is not installed yet, then offers the automatic or manual setup choice.",
+    "setupCommandCopied": "Command copied. Paste it into PowerShell at the project root.",
+    "setupCommandCopyFailed": "Could not copy. Type powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\\scripts\\setup-windows.ps1 in PowerShell at the project root.",
+    "manualStep1": "Install Node.js 20 or newer from nodejs.org.",
+    "manualStep2": "Open a new PowerShell window, then install pnpm with npm install --global pnpm@10.13.1.",
+    "manualStep3": "Install Rustup for Windows from rustup.rs.",
+    "manualStep4": "Install the Rust toolchain used by this project: rustup toolchain install nightly-2025-12-04 --component rustfmt --component rust-analyzer --component rust-src.",
+    "manualStep5": "At the project root, install JavaScript dependencies: pnpm install --frozen-lockfile.",
+    "manualStep6": "Download Rust dependencies: cargo fetch --locked.",
+    "manualStep7": "Check prerequisites: pnpm run check:windows-prereqs.",
+    "manualStep8": "Start the app: pnpm dev.",
+    "apiSetupProgress": "Step 2 of 3 · Provider and response style",
+    "apiSetupTitle": "Choose your starting model",
+    "apiSetupDescription": "Your coding agent is {{agent}}. Add a provider now, or continue without a key if this agent is already signed in.",
+    "apiRecommendationsTitle": "Recommended options",
+    "api": {
+      "openrouter": {
+        "name": "OpenRouter · recommended",
+        "summary": "One key for several providers. Its free router advertises up to 200,000 context tokens; free model availability and limits change.",
+        "guide": "1. Create an OpenRouter account. 2. Open the keys page and create a key. 3. Return here, choose the OpenRouter preset under Add a provider, then paste the key into the masked field. This preset works with Claude Code. Never paste the key into a conversation. Check the privacy policy for your selected model and inference provider."
+      },
+      "gemini": {
+        "name": "Google AI Studio · large context",
+        "summary": "Some Gemini 3 models accept up to 1 million input tokens. Model access and free availability depend on current quotas and offers; this option is best suited to the Gemini agent.",
+        "guide": "1. Open Google AI Studio and sign in. 2. Create a Gemini API key on the API keys page. 3. In FreeClaude Voice, configure it for the Gemini agent. Check the selected model's quota before sending a large repository.",
+        "privacy": "Note: on the free tier, Google may use submitted data to improve its products. Avoid sending secrets or confidential code with this key."
+      },
+      "nvidia": {
+        "name": "NVIDIA NIM · selected models",
+        "summary": "Some models may offer free access with model-specific limits. In the current catalog, the NVIDIA NIM preset does not support Claude Code; it is for selected other agents.",
+        "guide": "1. Create an account on NVIDIA Build. 2. Choose a NIM model and check its current limits and terms. 3. Create a key from the model page, then add the NVIDIA NIM preset in FreeClaude Voice. Check that your agent is compatible."
+      }
+    },
+    "readApiGuide": "View guide",
+    "closeApiGuide": "Close",
+    "createApiKey": "Open the official site to create a key ↗",
+    "responseStyleTitle": "Choose your response style",
+    "responseStyleDescription": "Call mode asks for short replies. The microphone dictates your message, and the speaker button reads a reply aloud.",
+    "addApiKeyTitle": "Add an API key now",
+    "addApiKeyDescription": "The key is masked while you type and saved with this provider on this device. You can also configure it later in Settings → Providers.",
+    "openProviderForm": "Add a provider",
+    "closeProviderForm": "Close form",
+    "saveProvider": "Save provider",
+    "providerAdded": "Provider saved on this device.",
+    "apiKeyOptional": "Optional: continue now and configure a provider later.",
+    "skipApiSetup": "Continue without a key",
+    "continueToApp": "Continue",
+    "backToPreferences": "Back to preferences",
+    "startupExample": "Example: if Rust or a dependency is missing, the terminal shows the specific error. Fix it, then choose Check again.",
+    "retryStartup": "Check again",
+    "retryingStartup": "Checking…"
   }
 }
